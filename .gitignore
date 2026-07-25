@@ -1,0 +1,20 @@
+__pycache__/
+.pytest_cache/
+.venv/
+*.pyc
+
+# .NET build output
+**/bin/
+**/obj/
+
+# O365 Audit runtime state
+src/O365AuditTool/data/
+src/O365AuditTool/Data/*.db
+src/O365AuditTool/Data/*.db-*
+src/O365AuditTool/run-smoke*.log
+
+# Local deployment/download artifacts
+tmp/
+artifacts/o365audit-release/
+TestResults/
+.vs/

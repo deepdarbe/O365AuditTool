@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>O365 Migration Audit Dashboard</title>
+  <style>
+    :root {
+      --bg: #f2f6f5;
+      --panel: #ffffff;
+      --ink: #102a2c;
+      --muted: #557176;
+      --accent: #146356;
+      --accent-strong: #0c453c;
+      --accent-soft: #dceee9;
+      --warn: #a55d00;
+      --warn-soft: #fff3d6;
+      --error: #9b2226;
+      --error-soft: #fbe7e8;
+      --ok: #187667;
+      --border: #d1dddc;
+      --shadow: 0 14px 35px rgba(17, 54, 50, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Aptos, "Trebuchet MS", sans-serif;
+      background:
+        radial-gradient(circle at 90% -10%, rgba(41, 139, 121, 0.18), transparent 34rem),
+        linear-gradient(145deg, #edf6f3 0%, var(--bg) 45%, #f7f8f3 100%);
+      color: var(--ink);
+    }
+    header {
+      position: relative;
+      overflow: hidden;
+      padding: 28px clamp(18px, 4vw, 48px);
+      background: linear-gradient(120deg, #082f2a, #0c4a40 62%, #176a5a);
+      color: #fff;
+    }
+    header::after {
+      content: "";
+      position: absolute;
+      right: -80px;
+      top: -130px;
+      width: 360px;
+      height: 360px;
+      border: 44px solid rgba(255, 255, 255, 0.07);
+      border-radius: 50%;
+    }
+    header h1 { margin: 0; max-width: 840px; font-family: Georgia, serif; font-size: clamp(25px, 4vw, 38px); font-weight: 500; }
+    header p { margin: 8px 0 0; max-width: 760px; color: #cce1dc; }
+    .wrap { width: min(1520px, 100%); margin: 0 auto; padding: 22px clamp(14px, 3vw, 34px) 38px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 11px; }
+    .card, .panel {
+      background: var(--panel);
+      background: color-mix(in srgb, var(--panel) 96%, transparent);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+    }
+    .card { padding: 14px; border-top: 3px solid var(--accent); }
+    .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .value { margin-top: 5px; font-family: Georgia, serif; font-size: 28px; font-weight: 700; }
+    .panel { margin-top: 18px; padding: 18px; }
+    .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 13px; }
+    .section-head h2 { margin: 0; font-family: Georgia, serif; font-size: 21px; font-weight: 600; }
+    .section-head p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+    .pill {
+      flex: 0 0 auto;
+      padding: 5px 9px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent-strong);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .toolbar, .form-grid { display: flex; gap: 9px; flex-wrap: wrap; align-items: end; }
+    .toolbar { margin: 12px 0; }
+    .field { display: grid; gap: 5px; flex: 1 1 170px; }
+    .field.wide { flex-basis: 330px; }
+    label, legend { color: var(--muted); font-size: 12px; font-weight: 700; }
+    input, select {
+      width: 100%;
+      min-height: 39px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+      font-size: 13px;
+    }
+    input:focus, select:focus { outline: 3px solid rgba(20, 99, 86, 0.16); border-color: var(--accent); }
+    button {
+      min-height: 39px;
+      padding: 8px 13px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    button:hover:not(:disabled) { background: var(--accent-strong); }
+    button.secondary { border-color: var(--border); background: #fff; color: var(--accent-strong); }
+    button.danger { background: var(--error); }
+    button:disabled { cursor: not-allowed; opacity: 0.48; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 9px; }
+    table { width: 100%; border-collapse: collapse; background: var(--panel); }
+    th, td { border-bottom: 1px solid var(--border); text-align: left; padding: 9px; font-size: 12px; vertical-align: top; }
+    th { position: sticky; top: 0; z-index: 1; background: #e8f0ef; color: #284b4d; white-space: nowrap; }
+    tbody tr:hover { background: #f7fbfa; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .path-cell { min-width: 260px; max-width: 480px; overflow-wrap: anywhere; font-family: Consolas, monospace; }
+    .ok { color: var(--ok); font-weight: 700; }
+    .offline, .warning { color: var(--warn); font-weight: 700; }
+    .error { color: var(--error); font-weight: 700; }
+    .muted { color: var(--muted); }
+    .empty { display: none; margin: 0; padding: 16px; color: var(--muted); text-align: center; }
+    .empty.visible { display: block; }
+    .notice {
+      margin: 10px 0 14px;
+      padding: 11px 13px;
+      border-left: 4px solid var(--warn);
+      border-radius: 5px;
+      background: var(--warn-soft);
+      color: #72460b;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .feedback { min-height: 20px; margin: 10px 0 0; font-size: 13px; }
+    fieldset {
+      display: flex;
+      gap: 12px;
+      min-height: 66px;
+      margin: 0;
+      padding: 8px 11px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+    }
+    fieldset label { display: inline-flex; gap: 5px; align-items: center; color: var(--ink); }
+    fieldset input { width: auto; min-height: auto; }
+    dialog {
+      width: min(560px, calc(100% - 28px));
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 0 28px 90px rgba(5, 35, 31, 0.35);
+      color: var(--ink);
+    }
+    dialog::backdrop { background: rgba(7, 38, 34, 0.64); backdrop-filter: blur(2px); }
+    dialog h2 { margin-top: 0; font-family: Georgia, serif; }
+    .dialog-summary { padding: 10px; border-radius: 7px; background: #edf4f2; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+    .confirm-line { display: flex; align-items: flex-start; gap: 8px; margin: 15px 0; color: var(--ink); line-height: 1.4; }
+    .confirm-line input { width: auto; min-height: auto; margin-top: 3px; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    @media (max-width: 720px) {
+      header { padding: 22px 18px; }
+      .wrap { padding: 14px 10px 28px; }
+      .panel { padding: 13px; }
+      .section-head { display: block; }
+      .pill { display: inline-block; margin-top: 8px; }
+      .toolbar button, .form-grid button { flex: 1 1 130px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>O365 Migration Audit</h1>
+    <p>PST, Outlook profilleri, NK2/N2K legacy artefact'leri ve kontrollü migration copy planları için merkezi görünürlük.</p>
+  </header>
+
+  <main class="wrap">
+    <section class="grid" aria-label="Özet metrikler">
+      <article class="card"><div class="label">Cihazlar</div><div class="value" id="statDevices">-</div></article>
+      <article class="card"><div class="label">Offline</div><div class="value" id="statOffline">-</div></article>
+      <article class="card"><div class="label">Hatalar</div><div class="value" id="statErrors">-</div></article>
+      <article class="card"><div class="label">PST (GB)</div><div class="value" id="statPst">-</div></article>
+      <article class="card"><div class="label">NK2 / N2K</div><div class="value" id="statLegacy">-</div></article>
+      <article class="card"><div class="label">SSD / NVMe</div><div class="value" id="statStorage">-</div></article>
+    </section>
+
+    <section class="panel" aria-labelledby="deviceTitle">
+      <div class="section-head">
+        <div>
+          <h2 id="deviceTitle">Cihaz ve PST envanteri</h2>
+          <p>En son başarılı/offline tarama sonuçları ve migration readiness görünümü.</p>
+        </div>
+        <span class="pill">Inventory</span>
+      </div>
+      <div class="toolbar">
+        <div class="field"><label for="fDevice">Cihaz</label><input id="fDevice" placeholder="PC-FIN-001" /></div>
+        <div class="field"><label for="fUser">Kullanıcı / e-posta</label><input id="fUser" placeholder="user@contoso.local" /></div>
+        <div class="field">
+          <label for="fDiskType">Disk tipi</label>
+          <select id="fDiskType">
+            <option value="">Tümü</option>
+            <option value="SATA">SATA</option>
+            <option value="SSD">SSD</option>
+            <option value="NVMe">NVMe</option>
+          </select>
+        </div>
+        <div class="field"><label for="fOfficeVersion">Office sürümü</label><input id="fOfficeVersion" placeholder="16.0" /></div>
+        <button id="filterDevicesButton" type="button">Filtrele</button>
+        <button id="startScanButton" type="button">Tarama başlat</button>
+        <button id="exportCsvButton" class="secondary" type="button">CSV</button>
+        <button id="exportPdfButton" class="secondary" type="button">Executive PDF</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Cihaz</th><th>Durum</th><th>Seri no</th><th>IP adresleri</th><th>Son kullanıcı</th><th>Disk</th><th>Boş GB</th><th>Office</th><th>PST GB</th><th>Toplandı</th>
+            </tr>
+          </thead>
+          <tbody id="deviceRows"></tbody>
+        </table>
+        <p class="empty" id="deviceEmpty">Filtrelerle eşleşen cihaz bulunamadı.</p>
+      </div>
+      <p class="feedback" id="deviceFeedback" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="panel" aria-labelledby="legacyTitle">
+      <div class="section-head">
+        <div>
+          <h2 id="legacyTitle">Legacy Outlook dosyaları</h2>
+          <p>Cihazdaki tüm Windows profillerinden bulunan NK2 ve N2K autocomplete artefact'leri.</p>
+        </div>
+        <span class="pill">All profiles</span>
+      </div>
+      <div class="toolbar">
+        <div class="field"><label for="legacyDevice">Cihaz</label><input id="legacyDevice" placeholder="PC-FIN-001" /></div>
+        <div class="field"><label for="legacyUser">Kullanıcı / UPN</label><input id="legacyUser" placeholder="CONTOSO\kullanici" /></div>
+        <div class="field"><label for="legacyProfile">Outlook profili</label><input id="legacyProfile" placeholder="Outlook" /></div>
+        <div class="field">
+          <label for="legacyType">Dosya tipi</label>
+          <select id="legacyType">
+            <option value="">NK2 + N2K</option>
+            <option value="NK2">NK2</option>
+            <option value="N2K">N2K</option>
+          </select>
+        </div>
+        <button id="filterLegacyButton" type="button">Filtrele</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Tip</th><th>Cihaz</th><th>Kullanıcı</th><th>SID</th><th>Profil</th><th>Dosya yolu</th><th>Boyut</th><th>Son değişiklik</th><th>Erişim</th>
+            </tr>
+          </thead>
+          <tbody id="legacyRows"></tbody>
+        </table>
+        <p class="empty" id="legacyEmpty">Filtrelerle eşleşen NK2/N2K dosyası bulunamadı.</p>
+      </div>
+      <p class="feedback" id="legacyFeedback" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="panel" aria-labelledby="copyTitle">
+      <div class="section-head">
+        <div>
+          <h2 id="copyTitle">Migration copy planları</h2>
+          <p>Keşif snapshot'ından plan üretin, hedef yolları inceleyin ve kopyalamayı ayrıca onaylayın.</p>
+        </div>
+        <span class="pill">Two-stage workflow</span>
+      </div>
+      <div class="notice">
+        Plan oluşturmak dosya kopyalamaz. Execute işlemi için AuditAdmin yetkisi ve açık onay gerekir. Servis hesabı kaynak cihazlarda <strong>ADMIN$ read</strong>, hedef share üzerinde <strong>create/write</strong> yetkisine sahip olmalıdır.
+      </div>
+      <form id="copyPlanForm">
+        <div class="form-grid">
+          <div class="field wide">
+            <label for="copyTargetRoot">Hedef kök (boşsa sunucu varsayılanı)</label>
+            <input id="copyTargetRoot" placeholder="\\filesrv\O365Migration" />
+          </div>
+          <div class="field">
+            <label for="copyDevices">Cihazlar (virgülle)</label>
+            <input id="copyDevices" placeholder="PC-001, PC-002" />
+          </div>
+          <div class="field">
+            <label for="copyUsers">Kullanıcılar (virgülle)</label>
+            <input id="copyUsers" placeholder="user@contoso.local" />
+          </div>
+          <fieldset>
+            <legend>Artefact tipleri</legend>
+            <label><input type="checkbox" name="copyArtifactType" value="PST" checked /> PST</label>
+            <label><input type="checkbox" name="copyArtifactType" value="NK2" checked /> NK2</label>
+            <label><input type="checkbox" name="copyArtifactType" value="N2K" checked /> N2K</label>
+          </fieldset>
+          <button type="submit">Plan oluştur</button>
+          <button id="refreshPlansButton" class="secondary" type="button">Planları yenile</button>
+        </div>
+      </form>
+      <p class="feedback" id="copyFeedback" role="status" aria-live="polite"></p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Plan</th><th>Durum</th><th>Hedef</th><th>İsteyen</th><th>Öğeler</th><th>Tamam / hata</th><th>Oluşturuldu</th><th>İşlem</th>
+            </tr>
+          </thead>
+          <tbody id="copyPlanRows"></tbody>
+        </table>
+        <p class="empty" id="copyPlansEmpty">Henüz copy planı oluşturulmadı.</p>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="executeDialog" aria-labelledby="executeDialogTitle">
+    <h2 id="executeDialogTitle">Copy planını yürüt</h2>
+    <p>Bu işlem keşfedilen dosyaları yapılandırılmış hedef köke kopyalamaya başlayacaktır.</p>
+    <div class="dialog-summary" id="executeSummary"></div>
+    <label class="confirm-line">
+      <input id="executeAcknowledgement" type="checkbox" />
+      Plan hedefini ve öğe sayısını kontrol ettim; kopyalama işlemini başlatmayı açıkça onaylıyorum.
+    </label>
+    <div class="dialog-actions">
+      <button id="cancelExecuteButton" class="secondary" type="button">İptal</button>
+      <button id="confirmExecuteButton" class="danger" type="button" disabled>Execute</button>
+    </div>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>

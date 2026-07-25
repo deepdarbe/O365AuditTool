@@ -1,0 +1,116 @@
+name: O365 Audit CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - ".github/workflows/o365audit-ci.yml"
+      - "docs/DEPLOYMENT-DC.md"
+      - "docs/O365-ARTIFACT-COPY-ARCHITECTURE.md"
+      - "scripts/collector.ps1"
+      - "scripts/Deploy-ManagementServer.ps1"
+      - "scripts/Install-O365AuditTool.ps1"
+      - "scripts/New-O365AuditRelease.ps1"
+      - "scripts/Test-O365AuditRelease.ps1"
+      - "src/O365AuditTool/**"
+      - "tests/O365AuditTool.Tests/**"
+      - "README.md"
+  pull_request:
+    paths:
+      - ".github/workflows/o365audit-ci.yml"
+      - "docs/DEPLOYMENT-DC.md"
+      - "docs/O365-ARTIFACT-COPY-ARCHITECTURE.md"
+      - "scripts/**"
+      - "src/O365AuditTool/**"
+      - "tests/O365AuditTool.Tests/**"
+      - "README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore .\tests\O365AuditTool.Tests\O365AuditTool.Tests.csproj
+
+      - name: Test
+        shell: pwsh
+        run: dotnet test .\tests\O365AuditTool.Tests\O365AuditTool.Tests.csproj -c Release --no-restore
+
+      - name: Verify PowerShell syntax
+        shell: pwsh
+        run: |
+          $files = @(
+            '.\scripts\collector.ps1',
+            '.\scripts\Deploy-ManagementServer.ps1',
+            '.\scripts\Install-O365AuditTool.ps1',
+            '.\scripts\New-O365AuditRelease.ps1',
+            '.\scripts\Test-O365AuditRelease.ps1'
+          )
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file),
+              [ref]$tokens,
+              [ref]$errors
+            ) > $null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "$file :: $($_.Message)" }
+              exit 1
+            }
+          }
+
+      - name: Verify dashboard JavaScript
+        shell: pwsh
+        run: node --check .\src\O365AuditTool\wwwroot\app.js
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build self-contained release
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          .\scripts\New-O365AuditRelease.ps1 -Version $version -OutputDirectory .\dist
+
+      - name: Verify release archive
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem .\dist\O365AuditTool-*.zip | Select-Object -First 1
+          .\scripts\Test-O365AuditRelease.ps1 -ArchivePath $archive.FullName
+
+      - name: Publish private GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            .\dist\O365AuditTool-*.zip `
+            .\dist\O365AuditTool-*.zip.sha256 `
+            .\scripts\Install-O365AuditTool.ps1 `
+            --title "O365AuditTool $env:GITHUB_REF_NAME" `
+            --generate-notes
