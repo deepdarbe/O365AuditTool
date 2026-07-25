@@ -8,9 +8,9 @@ __pycache__/
 **/obj/
 
 # O365 Audit runtime state
-src/O365AuditTool/data/
 src/O365AuditTool/Data/*.db
-src/O365AuditTool/Data/*.db-*
+src/O365AuditTool/Data/*.db-shm
+src/O365AuditTool/Data/*.db-wal
 src/O365AuditTool/run-smoke*.log
 
 # Local deployment/download artifacts
