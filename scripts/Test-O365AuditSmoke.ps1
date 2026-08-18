@@ -23,16 +23,43 @@ $startInfo.RedirectStandardOutput = $true
 $startInfo.RedirectStandardError = $true
 $startInfo.EnvironmentVariables['ASPNETCORE_ENVIRONMENT'] = 'Development'
 $startInfo.EnvironmentVariables['ASPNETCORE_URLS'] = "http://127.0.0.1:$Port"
+$windowsIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$smokeRole = @(
+    $windowsIdentity.Groups |
+        ForEach-Object {
+            try { $_.Translate([Security.Principal.NTAccount]).Value }
+            catch { $null }
+        } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+)[0]
+if ([string]::IsNullOrWhiteSpace($smokeRole)) {
+    throw 'Current Windows identity does not expose a group for authenticated smoke RBAC.'
+}
+$startInfo.EnvironmentVariables['Auth__RoleMappings__AuditReader__0'] = $smokeRole
 
 $process = New-Object Diagnostics.Process
 $process.StartInfo = $startInfo
 $null = $process.Start()
 
 function Get-HttpStatus {
-    param([Parameter(Mandatory)][string]$Uri)
+    param(
+        [Parameter(Mandatory)][string]$Uri,
+        [switch]$UseDefaultCredentials
+    )
 
     try {
-        return [int](Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 5).StatusCode
+        $requestParameters = @{
+            Uri = $Uri
+            UseBasicParsing = $true
+            TimeoutSec = 5
+        }
+        if ($UseDefaultCredentials) {
+            $requestParameters.UseDefaultCredentials = $true
+            if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey('AllowUnencryptedAuthentication')) {
+                $requestParameters.AllowUnencryptedAuthentication = $true
+            }
+        }
+        return [int](Invoke-WebRequest @requestParameters).StatusCode
     }
     catch {
         if ($null -ne $_.Exception.Response) {
@@ -60,14 +87,29 @@ try {
 
     $dashboardStatus = Get-HttpStatus -Uri "http://127.0.0.1:$Port/"
     $apiStatus = Get-HttpStatus -Uri "http://127.0.0.1:$Port/api/inventory/devices"
-    if ($healthStatus -ne 200 -or $dashboardStatus -ne 401 -or $apiStatus -ne 401) {
-        throw "Smoke status mismatch. health=$healthStatus dashboard=$dashboardStatus api=$apiStatus"
+    $authenticatedDashboardStatus = Get-HttpStatus `
+        -Uri "http://127.0.0.1:$Port/" `
+        -UseDefaultCredentials
+    $authenticatedApiStatus = Get-HttpStatus `
+        -Uri "http://127.0.0.1:$Port/api/inventory/devices" `
+        -UseDefaultCredentials
+    if (
+        $healthStatus -ne 200 -or
+        $dashboardStatus -ne 401 -or
+        $apiStatus -ne 401 -or
+        $authenticatedDashboardStatus -ne 200 -or
+        $authenticatedApiStatus -ne 200
+    ) {
+        throw "Smoke status mismatch. health=$healthStatus dashboardAnonymous=$dashboardStatus apiAnonymous=$apiStatus dashboardAuthenticated=$authenticatedDashboardStatus apiAuthenticated=$authenticatedApiStatus"
     }
 
     [pscustomobject]@{
         HealthStatus = $healthStatus
         DashboardAnonymousStatus = $dashboardStatus
         ApiAnonymousStatus = $apiStatus
+        DashboardAuthenticatedStatus = $authenticatedDashboardStatus
+        ApiAuthenticatedStatus = $authenticatedApiStatus
+        AuthenticatedRole = $smokeRole
         ProcessId = $process.Id
     }
 }

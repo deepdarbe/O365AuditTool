@@ -84,7 +84,7 @@ builder.Services.AddAntiforgery(options =>
         ? CookieSecurePolicy.Always
         : CookieSecurePolicy.SameAsRequest;
 });
-builder.Services.AddControllers(options =>
+builder.Services.AddControllersWithViews(options =>
     options.Filters.Add(new AutoValidateAntiforgeryTokenAttribute()));
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
