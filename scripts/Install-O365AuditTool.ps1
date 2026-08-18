@@ -17,6 +17,7 @@ param(
     [string]$DashboardDnsName = "",
     [string]$TlsCertificateThumbprint = "",
     [switch]$AllowInsecureHttpDashboard,
+    [switch]$AutoConfigure,
     [string]$PsExecPath = 'C:\Tools\PsExec\PsExec64.exe',
     [bool]$DownloadPsExecIfMissing = $true,
     [string]$CollectorSharePath = '',
@@ -372,6 +373,9 @@ try {
     }
     if ($AllowInsecureHttpDashboard) {
         $deployArguments.AllowInsecureHttpDashboard = $true
+    }
+    if ($AutoConfigure) {
+        $deployArguments.AutoConfigure = $true
     }
     if ($EnableArtifactCopy) {
         $deployArguments.EnableArtifactCopy = $true

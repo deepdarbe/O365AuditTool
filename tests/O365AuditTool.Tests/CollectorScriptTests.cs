@@ -57,6 +57,37 @@ public class CollectorScriptTests
     }
 
     [Fact]
+    public void AutonomousDeployment_IsExplicitAndWiredThroughBootstrap()
+    {
+        var deployment = File.ReadAllText(FindRepositoryFile("scripts\\Deploy-ManagementServer.ps1"));
+        var bootstrap = File.ReadAllText(FindRepositoryFile("scripts\\Install-O365AuditTool.ps1"));
+
+        Assert.Contains("[switch]$AutoConfigure", deployment, StringComparison.Ordinal);
+        Assert.Contains("Resolve-DomainRidAccount -Rid 512", deployment, StringComparison.Ordinal);
+        Assert.Contains("New-AutomaticTlsCertificate", deployment, StringComparison.Ordinal);
+        Assert.Contains("$DefaultOuFilter = Get-DefaultDomainNamingContext", deployment, StringComparison.Ordinal);
+        Assert.Contains("$deployArguments.AutoConfigure = $true", bootstrap, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DeploymentTlsCandidate_RequiresServerAuthAndMatchingSan()
+    {
+        var output = InvokePowerShellFunctions(
+            "scripts\\Deploy-ManagementServer.ps1",
+            "$rsa=[Security.Cryptography.RSA]::Create(2048); try { " +
+            "$request=New-Object Security.Cryptography.X509Certificates.CertificateRequest('CN=audit.contoso.local',$rsa,[Security.Cryptography.HashAlgorithmName]::SHA256,[Security.Cryptography.RSASignaturePadding]::Pkcs1); " +
+            "$san=New-Object Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder; $san.AddDnsName('audit.contoso.local'); $request.CertificateExtensions.Add($san.Build()); " +
+            "$oids=New-Object Security.Cryptography.OidCollection; $null=$oids.Add((New-Object Security.Cryptography.Oid('1.3.6.1.5.5.7.3.1'))); " +
+            "$request.CertificateExtensions.Add((New-Object Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension($oids,$false))); " +
+            "$cert=$request.CreateSelfSigned((Get-Date).AddMinutes(-1),(Get-Date).AddDays(1)); " +
+            "@((Test-TlsCertificateCandidate -Certificate $cert -DnsName 'audit.contoso.local'),(Test-TlsCertificateCandidate -Certificate $cert -DnsName 'other.contoso.local')) -join '|'; $cert.Dispose() " +
+            "} finally { $rsa.Dispose() }"
+        );
+
+        Assert.Equal("True|False", output);
+    }
+
+    [Fact]
     public void DeploymentDirectoryCreation_AppliesProtectedAcl()
     {
         var path = Path.Combine(Path.GetTempPath(), $"o365audit-acl-{Guid.NewGuid():N}");

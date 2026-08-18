@@ -11,7 +11,7 @@ Uygulamayi Domain Controller uzerine degil, domain uyesi ayrik bir yonetim sunuc
 - Onerilen servis kimligi: gMSA. Alternatif: ayri, parolasi yonetilen domain servis hesabi.
 - `ActiveDirectory` PowerShell modulu gMSA testini otomatik yapabilmek icin onerilir.
 - Artifact copy acilacaksa onceden olusturulmus bir hedef dizin/share ve servis kimligine verilmis yazma yetkisi.
-- `LocalMachine\My` deposunda dashboard DNS adini SAN olarak kapsayan, private key ve Server Authentication EKU iceren TLS server sertifikasi.
+- Normal modda `LocalMachine\My` deposunda dashboard DNS adini SAN olarak kapsayan, private key ve Server Authentication EKU iceren TLS server sertifikasi. `-AutoConfigure` uygun sertifikayi bulabilir, AD CS enrollment deneyebilir veya self-signed fallback uretebilir.
 - HTTP SPN yazabilmek icin deployment hesabinda ilgili gMSA/servis/bilgisayar hesabi uzerinde yetki veya onceden kaydedilmis SPN'ler.
 
 Script su uc kimlik seceneginden tam olarak birini zorunlu tutar:
@@ -19,6 +19,28 @@ Script su uc kimlik seceneginden tam olarak birini zorunlu tutar:
 1. `-GmsaAccount 'DOMAIN\hesap$'` - onerilen.
 2. `-ServiceCredential $credential` - `DOMAIN\kullanici` biciminde PSCredential.
 3. `-AllowLocalSystem` - yalnizca acik risk kabuluyla; varsayilan degildir.
+
+`-AutoConfigure` bu alanlar bos birakildiginda LocalSystem'i acikca secer; mevcut bir gMSA veya credential verilirse onu ezmez.
+
+## Otonom Ilk Kurulum
+
+Domain-member yonetim sunucusunda Administrator PowerShell ile:
+
+```powershell
+.\Deploy-ManagementServer.ps1 -AutoConfigure
+```
+
+Bu mod:
+
+- Dashboard adini `<sunucu>.<AD-domain>` olarak algilar.
+- Eslesen gecerli TLS sertifikasini kullanir; yoksa AD CS `Machine` template enrollment dener; o da yoksa iki yillik, non-exportable self-signed TLS sertifikasi uretir.
+- Servis kimligi verilmediyse LocalSystem kullanir.
+- Eksik RBAC rollerini domain SID + RID 512 ile bulunan Domain Admins grubuna baglar.
+- OU/site verilmediyse default naming context'i tarama kapsami yapar.
+- Domain Computers grubunu SID + RID 515 ile algilar.
+- Artifact copy ozelligini kapali tutar.
+
+Otonom kurulum teknik konfigurasyonu tamamlar fakat kurumsal yetki modelini tahmin etmez. LocalSystem uzak cihazlara yonetim sunucusunun bilgisayar hesabi ile gider; bu hesaba audit OU'larinda gerekli endpoint yetkilerini GPO ile verin. Self-signed fallback kullanilirsa dashboard HTTPS calisir ancak istemci guveni domain genelinde otomatik olusmaz; public sertifikayi Trusted Root GPO veya kurumsal PKI ile dagitin. Ilk kurulumdan sonra Domain Admins eslemelerini ayrik least-privilege audit gruplari ve mumkunse gMSA ile degistirin.
 
 ## Onerilen gMSA Hazirligi
 
