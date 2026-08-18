@@ -50,6 +50,19 @@
     }
     header h1 { margin: 0; max-width: 840px; font-family: Georgia, serif; font-size: clamp(25px, 4vw, 38px); font-weight: 500; }
     header p { margin: 8px 0 0; max-width: 760px; color: #cce1dc; }
+    .session-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      margin-top: 13px;
+      padding: 6px 10px;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      color: #e8f5f2;
+      font: 12px Consolas, monospace;
+    }
+    .session-badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #68d5bd; }
     .wrap { width: min(1520px, 100%); margin: 0 auto; padding: 22px clamp(14px, 3vw, 34px) 38px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 11px; }
     .card, .panel {
@@ -172,6 +185,7 @@
   <header>
     <h1>O365 Migration Audit</h1>
     <p>PST, Outlook profilleri, NK2/N2K legacy artefact'leri ve kontrollü migration copy planları için merkezi görünürlük.</p>
+    <div class="session-badge" id="sessionBadge">Windows oturumu doğrulanıyor...</div>
   </header>
 
   <main class="wrap">
@@ -193,8 +207,14 @@
         <span class="pill">Inventory</span>
       </div>
       <div class="toolbar">
-        <div class="field"><label for="fOu">OU kapsamı</label><input id="fOu" placeholder="OU=Workstations,DC=contoso,DC=local" /></div>
-        <div class="field"><label for="fSite">AD site</label><input id="fSite" placeholder="Istanbul-HQ" /></div>
+        <div class="field wide">
+          <label for="fOu">OU kapsamı</label>
+          <select id="fOu" disabled><option value="">AD OU'ları yükleniyor...</option></select>
+        </div>
+        <div class="field">
+          <label for="fSite">AD site</label>
+          <select id="fSite" disabled><option value="">AD siteleri yükleniyor...</option></select>
+        </div>
         <div class="field"><label for="fDevice">Cihaz</label><input id="fDevice" placeholder="PC-FIN-001" /></div>
         <div class="field"><label for="fUser">Kullanıcı / e-posta</label><input id="fUser" placeholder="user@contoso.local" /></div>
         <div class="field">
@@ -223,9 +243,11 @@
         <div class="field"><label for="fPstMaxGb">Max PST GB</label><input id="fPstMaxGb" type="number" min="0" step="0.1" placeholder="100" /></div>
         <button id="filterDevicesButton" type="button">Filtrele</button>
         <button id="startScanButton" type="button">Tarama başlat</button>
+        <button id="refreshDirectoryButton" class="secondary" type="button">AD yenile</button>
         <button id="exportCsvButton" class="secondary" type="button">CSV</button>
         <button id="exportPdfButton" class="secondary" type="button">Executive PDF</button>
       </div>
+      <p class="feedback" id="directoryFeedback" role="status" aria-live="polite"></p>
       <div class="table-wrap">
         <table>
           <thead>

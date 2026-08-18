@@ -38,6 +38,7 @@ Bu mod:
 - Eksik RBAC rollerini domain SID + RID 512 ile bulunan Domain Admins grubuna baglar.
 - OU/site verilmediyse default naming context'i tarama kapsami yapar.
 - Domain Computers grubunu SID + RID 515 ile algilar.
+- Yonetim sunucusunda dashboard FQDN'i icin Edge/Local Intranet sessiz Windows SSO policy degerlerini ayarlar.
 - Artifact copy ozelligini kapali tutar.
 
 Otonom kurulum teknik konfigurasyonu tamamlar fakat kurumsal yetki modelini tahmin etmez. LocalSystem uzak cihazlara yonetim sunucusunun bilgisayar hesabi ile gider; bu hesaba audit OU'larinda gerekli endpoint yetkilerini GPO ile verin. Self-signed fallback kullanilirsa dashboard HTTPS calisir ancak istemci guveni domain genelinde otomatik olusmaz; public sertifikayi Trusted Root GPO veya kurumsal PKI ile dagitin. Ilk kurulumdan sonra Domain Admins eslemelerini ayrik least-privilege audit gruplari ve mumkunse gMSA ile degistirin.
@@ -70,6 +71,17 @@ HTTP/o365audit
 ```
 
 Duplicate SPN veya yetersiz AD yetkisi varsa deployment durur. SPN'leri onceden kaydetmek icin domain yoneticisi ayni `setspn -S HTTP/o365audit.contoso.local CONTOSO\svcO365Audit$` komutunu kullanabilir. TLS kontrolu sertifikanin tarih araligini, private key'ini, Server Authentication EKU'sunu ve `-DashboardDnsName` eslesmesini dogrular.
+
+### Mevcut Windows oturumuyla sessiz SSO
+
+Dashboard Negotiate/Kerberos kullanir ve ayri uygulama parolasi tutmaz. `-AutoConfigure`, yonetim sunucusundaki Edge `AuthServerAllowlist` politikasina yalniz dashboard FQDN'ini ekler ve `https://<dashboard-fqdn>` adresini Local Intranet zone (`1`) olarak tanimlar. Edge tamamen kapatilarak yeniden acildiginda yonetim sunucusundaki mevcut domain oturumu otomatik kullanilir.
+
+Diger domain istemcilerinde ayni davranis icin asagidaki iki Computer Configuration degerini merkezi GPO ile dagitin:
+
+1. Microsoft Edge / HTTP Authentication / `Configure list of allowed authentication servers`: dashboard FQDN'i, ornek `o365audit.contoso.local`.
+2. Windows Internet Settings / Site to Zone Assignment List: `https://o365audit.contoso.local` = `1` (Local Intranet).
+
+`AuthNegotiateDelegateAllowlist` etkinlestirilmemelidir. Dashboard kullanici credential'iyla hedef cihazlara ikinci atlama yapmaz; collector servisi kendi gMSA veya makine hesabi kimligini kullanir. Bu nedenle credential delegation gereksiz bir yetki genislemesidir.
 
 ## Endpoint Yetkileri
 

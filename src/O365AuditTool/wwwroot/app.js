@@ -32,8 +32,16 @@ async function fetchJson(url, options) {
     requestOptions.headers = headers;
   }
 
-  const response = await fetch(url, requestOptions);
-  const responseText = await response.text();
+  let response;
+  let responseText = "";
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    response = await fetch(url, requestOptions);
+    responseText = await response.text();
+    if (response.status !== 503 || method !== "GET" || attempt === 2) {
+      break;
+    }
+    await new Promise(resolve => window.setTimeout(resolve, 600 * (attempt + 1)));
+  }
   if (!response.ok) {
     let details = "";
     try {
@@ -49,6 +57,66 @@ async function fetchJson(url, options) {
     return null;
   }
   return JSON.parse(responseText);
+}
+
+async function loadSession() {
+  try {
+    const session = await fetchJson("/api/security/session");
+    byId("sessionBadge").textContent = `${session.userName || "Windows kullanıcısı"} · ${session.authenticationType || "Negotiate"}`;
+  } catch (error) {
+    byId("sessionBadge").textContent = `Windows oturumu okunamadı · ${getErrorMessage(error, "HTTP hata")}`;
+  }
+}
+
+function replaceScopeOptions(selectId, items, placeholder, getValue, getLabel) {
+  const select = byId(selectId);
+  const selectedValue = select.value;
+  const fragment = document.createDocumentFragment();
+  const emptyOption = document.createElement("option");
+  emptyOption.value = "";
+  emptyOption.textContent = placeholder;
+  fragment.appendChild(emptyOption);
+
+  items.forEach(item => {
+    const option = document.createElement("option");
+    option.value = getValue(item);
+    option.textContent = getLabel(item);
+    option.title = item.distinguishedName || option.value;
+    fragment.appendChild(option);
+  });
+  select.replaceChildren(fragment);
+  select.disabled = false;
+  if ([...select.options].some(option => option.value === selectedValue)) {
+    select.value = selectedValue;
+  }
+}
+
+async function loadDirectoryStructure() {
+  const refreshButton = byId("refreshDirectoryButton");
+  refreshButton.disabled = true;
+  setFeedback("directoryFeedback", "Active Directory OU ve site yapısı yükleniyor...");
+  try {
+    const structure = await fetchJson("/api/directory/structure");
+    const organizationalUnits = Array.isArray(structure?.organizationalUnits) ? structure.organizationalUnits : [];
+    const sites = Array.isArray(structure?.sites) ? structure.sites : [];
+    replaceScopeOptions(
+      "fOu",
+      organizationalUnits,
+      "Tüm OU'lar / seçim yapın",
+      item => item.distinguishedName,
+      item => `${"\u00a0\u00a0".repeat(Math.max(0, Number(item.depth || 1) - 1))}${item.displayName || item.name}`);
+    replaceScopeOptions("fSite", sites, "Tüm AD siteleri / seçim yapın", item => item.name, item => item.name);
+    setFeedback(
+      "directoryFeedback",
+      `${organizationalUnits.length} OU ve ${sites.length} AD site yüklendi · ${structure.domainDistinguishedName || "domain"}`,
+      "ok");
+  } catch (error) {
+    byId("fOu").disabled = true;
+    byId("fSite").disabled = true;
+    setFeedback("directoryFeedback", `AD yapısı yüklenemedi: ${getErrorMessage(error, "Bilinmeyen hata")}`, "error");
+  } finally {
+    refreshButton.disabled = false;
+  }
 }
 
 async function getCsrfToken() {
@@ -554,6 +622,7 @@ async function executeCopyPlan() {
 function bindEvents() {
   byId("filterDevicesButton").addEventListener("click", loadData);
   byId("startScanButton").addEventListener("click", startScan);
+  byId("refreshDirectoryButton").addEventListener("click", loadDirectoryStructure);
   byId("exportCsvButton").addEventListener("click", exportCsv);
   byId("exportPdfButton").addEventListener("click", exportPdf);
   byId("filterLegacyButton").addEventListener("click", loadLegacyFiles);
@@ -569,5 +638,12 @@ function bindEvents() {
 
 document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
-  void Promise.allSettled([loadData(), loadLegacyFiles(), loadLicenseRecommendations(), loadCopyPlans()]);
+  void Promise.allSettled([
+    loadSession(),
+    loadDirectoryStructure(),
+    loadData(),
+    loadLegacyFiles(),
+    loadLicenseRecommendations(),
+    loadCopyPlans()
+  ]);
 });

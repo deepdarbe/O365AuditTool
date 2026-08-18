@@ -122,7 +122,7 @@ if ((Get-FileHash $bootstrapPath -Algorithm SHA256).Hash -ne '<BOOTSTRAP_SHA256>
 
 `-ChecksumUri` de desteklenir ancak ayni sunucudaki ZIP ve checksum birlikte degistirilebilecegi icin production'da SHA256 degerini ayri/guvenilir kanaldan `-ExpectedSha256` ile vermek daha guvenlidir.
 
-Private GitHub deposunun raw/release adresleri anonim hedef sunucular tarafindan indirilemez. GitHub API asset URL'sini `Authorization: Bearer` header'i ve yalnizca `Contents: Read` yetkili fine-grained PAT ile kullanin veya release'i kurum artifact repository'sine mirror edin. PAT/token'i URL, script, komut satiri, log veya `appsettings` icine yazmayin; interaktif credential prompt ile process memory'de tutun.
+Kaynak deposu private kalir; checksum ile dogrulanmis kurulum varliklari anonim erisim icin public [O365AuditTool-Releases](https://github.com/deepdarbe/O365AuditTool-Releases/releases) deposuna mirror edilir. Hedef sunucuda PAT, GitHub kullanici adi veya parola kullanmayin. Kurum ici artifact repository tercih edilirse ayni bootstrap ve bundle SHA256 kontrollerini koruyun.
 
 Bundle deployment modu [Deploy-ManagementServer.ps1](scripts/Deploy-ManagementServer.ps1) icin `-PublishedAppPath` ve `-CollectorPath` kullanir. Bu mod `.csproj`, `$PSScriptRoot` ve hedefte .NET SDK gerektirmez.
 

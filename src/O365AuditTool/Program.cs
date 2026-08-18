@@ -2,7 +2,9 @@ using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Negotiate;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using O365AuditTool.Data;
 using O365AuditTool.Services;
@@ -59,6 +61,7 @@ builder.Services.AddDbContext<AuditDbContext>(options =>
 });
 
 builder.Services.AddScoped<IDeviceTargetProvider, ActiveDirectoryTargetProvider>();
+builder.Services.AddScoped<IActiveDirectoryStructureProvider, ActiveDirectoryStructureProvider>();
 builder.Services.AddScoped<IRemoteCollectorRunner, PsExecCollectorRunner>();
 builder.Services.AddScoped<IInventoryIngestionService, InventoryIngestionService>();
 builder.Services.AddScoped<IInventoryQueryService, InventoryQueryService>();
@@ -94,7 +97,35 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<AuditDbContext>();
     db.Database.EnsureCreated();
     DatabaseSchemaBootstrapper.EnsureCurrentSchema(db);
+    DatabaseSchemaBootstrapper.ConfigureConcurrentAccess(db);
 }
+
+app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
+{
+    var feature = context.Features.Get<IExceptionHandlerFeature>();
+    var exception = feature?.Error ?? new InvalidOperationException("Unhandled request failure.");
+    var logger = context.RequestServices
+        .GetRequiredService<ILoggerFactory>()
+        .CreateLogger("O365AuditTool.UnhandledRequest");
+    logger.LogError(exception, "Unhandled request failure {TraceIdentifier}", context.TraceIdentifier);
+
+    var sqliteException = FindSqliteException(exception);
+    var databaseBusy = sqliteException?.SqliteErrorCode is 5 or 6;
+    if (databaseBusy)
+    {
+        context.Response.Headers.RetryAfter = "2";
+    }
+
+    await Results.Problem(
+        statusCode: databaseBusy
+            ? StatusCodes.Status503ServiceUnavailable
+            : StatusCodes.Status500InternalServerError,
+        title: databaseBusy
+            ? "Envanter veritabanı geçici olarak meşgul"
+            : "Sunucu isteği tamamlayamadı",
+        detail: $"İzleme kodu: {context.TraceIdentifier}")
+        .ExecuteAsync(context);
+}));
 
 if (app.Environment.IsDevelopment())
 {
@@ -173,6 +204,13 @@ app.MapGet("/api/security/antiforgery", (HttpContext context, IAntiforgery antif
         return Results.Ok(new { token = tokens.RequestToken });
     })
     .RequireAuthorization("AuditReader");
+app.MapGet("/api/security/session", (HttpContext context) => Results.Ok(new
+{
+    userName = context.User.Identity?.Name,
+    authenticationType = context.User.Identity?.AuthenticationType,
+    isAuthenticated = context.User.Identity?.IsAuthenticated == true
+}))
+    .RequireAuthorization("AuditReader");
 app.MapGet("/health", async (AuditDbContext db, CancellationToken cancellationToken) =>
     await db.Database.CanConnectAsync(cancellationToken)
         ? Results.Ok(new { status = "healthy" })
@@ -183,30 +221,31 @@ app.Run();
 
 static string ResolveSqliteConnectionString(string connectionString, string contentRoot)
 {
-    const string key = "Data Source=";
-    var idx = connectionString.IndexOf(key, StringComparison.OrdinalIgnoreCase);
-    if (idx < 0)
+    var sqlite = new SqliteConnectionStringBuilder(connectionString);
+    if (!string.IsNullOrWhiteSpace(sqlite.DataSource) && !Path.IsPathRooted(sqlite.DataSource))
     {
-        return connectionString;
+        var normalized = sqlite.DataSource
+            .Replace("./", string.Empty, StringComparison.Ordinal)
+            .Replace(".\\", string.Empty, StringComparison.Ordinal);
+        sqlite.DataSource = Path.Combine(contentRoot, normalized);
     }
 
-    var pathStart = idx + key.Length;
-    var rest = connectionString[pathStart..];
-    var semicolon = rest.IndexOf(';');
-    var pathPart = semicolon >= 0 ? rest[..semicolon] : rest;
-    var trimmedPath = pathPart.Trim().Trim('"');
+    sqlite.DefaultTimeout = Math.Max(sqlite.DefaultTimeout, 30);
+    sqlite.Pooling = true;
+    return sqlite.ToString();
+}
 
-    if (string.IsNullOrWhiteSpace(trimmedPath) || Path.IsPathRooted(trimmedPath))
+static SqliteException? FindSqliteException(Exception exception)
+{
+    for (var current = exception; current is not null; current = current.InnerException!)
     {
-        return connectionString;
+        if (current is SqliteException sqliteException)
+        {
+            return sqliteException;
+        }
     }
 
-    var normalized = trimmedPath
-        .Replace("./", string.Empty, StringComparison.Ordinal)
-        .Replace(".\\", string.Empty, StringComparison.Ordinal);
-
-    var absolute = Path.Combine(contentRoot, normalized);
-    return connectionString.Replace(pathPart, absolute, StringComparison.Ordinal);
+    return null;
 }
 
 static X509Certificate2 LoadServerCertificate(string? configuredThumbprint)

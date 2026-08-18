@@ -10,6 +10,25 @@ namespace O365AuditTool.Tests;
 public sealed class InventoryQueryServiceTests
 {
     [Fact]
+    public async Task EmptyInventory_ReturnsEmptyListWithoutServerError()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AuditDbContext>()
+            .UseSqlite(connection)
+            .Options;
+
+        await using var db = new AuditDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var service = new InventoryQueryService(db);
+
+        var devices = await service.GetLatestDevicesAsync(
+            null, null, null, null, null, null, null, null, null, CancellationToken.None);
+
+        Assert.Empty(devices);
+    }
+
+    [Fact]
     public async Task LatestOfflineSnapshot_PreservesLastInventoryAndLowersLicenseConfidence()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

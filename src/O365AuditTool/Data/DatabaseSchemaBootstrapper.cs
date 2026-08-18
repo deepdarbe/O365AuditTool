@@ -5,6 +5,12 @@ namespace O365AuditTool.Data;
 
 public static class DatabaseSchemaBootstrapper
 {
+    public static void ConfigureConcurrentAccess(AuditDbContext db)
+    {
+        db.Database.ExecuteSqlRaw("PRAGMA journal_mode=WAL;");
+        db.Database.ExecuteSqlRaw("PRAGMA synchronous=NORMAL;");
+    }
+
     public static void EnsureCurrentSchema(AuditDbContext db)
     {
         db.Database.ExecuteSqlRaw(

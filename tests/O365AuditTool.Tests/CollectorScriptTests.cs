@@ -57,6 +57,21 @@ public class CollectorScriptTests
     }
 
     [Fact]
+    public void DeploymentSsoAllowlist_MergesExactServerWithoutCredentialDelegationPolicy()
+    {
+        var output = InvokePowerShellFunctions(
+            "scripts\\Deploy-ManagementServer.ps1",
+            "Merge-WindowsAuthServerAllowlist -ExistingValue 'intranet.contoso.local,legacy.contoso.local' -ServerName 'audit.contoso.local'"
+        );
+        var deployment = File.ReadAllText(FindRepositoryFile("scripts\\Deploy-ManagementServer.ps1"));
+
+        Assert.Equal("audit.contoso.local,intranet.contoso.local,legacy.contoso.local", output);
+        Assert.Contains("AuthServerAllowlist", deployment, StringComparison.Ordinal);
+        Assert.Contains("ZoneMapKey", deployment, StringComparison.Ordinal);
+        Assert.DoesNotContain("AuthNegotiateDelegateAllowlist", deployment, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AutonomousDeployment_IsExplicitAndWiredThroughBootstrap()
     {
         var deployment = File.ReadAllText(FindRepositoryFile("scripts\\Deploy-ManagementServer.ps1"));

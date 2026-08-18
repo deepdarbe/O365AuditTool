@@ -8,6 +8,39 @@ namespace O365AuditTool.Tests;
 public class DatabaseSchemaBootstrapperTests
 {
     [Fact]
+    public void ConfigureConcurrentAccess_EnablesWalForFileDatabase()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"o365audit-wal-{Guid.NewGuid():N}.db");
+        try
+        {
+            var options = new DbContextOptionsBuilder<AuditDbContext>()
+                .UseSqlite($"Data Source={databasePath}")
+                .Options;
+            using var db = new AuditDbContext(options);
+            db.Database.EnsureCreated();
+
+            DatabaseSchemaBootstrapper.ConfigureConcurrentAccess(db);
+
+            using var command = db.Database.GetDbConnection().CreateCommand();
+            db.Database.OpenConnection();
+            command.CommandText = "PRAGMA journal_mode;";
+            Assert.Equal("wal", Convert.ToString(command.ExecuteScalar()));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var suffix in new[] { string.Empty, "-wal", "-shm" })
+            {
+                var path = databasePath + suffix;
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+        }
+    }
+
+    [Fact]
     public void EnsureCurrentSchema_AddsCopyAndLegacyTablesToExistingDatabase()
     {
         using var connection = new SqliteConnection("Data Source=:memory:");

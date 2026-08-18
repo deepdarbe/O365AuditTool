@@ -134,6 +134,55 @@ function Resolve-DashboardDnsName {
     return $name.ToLowerInvariant()
 }
 
+function Merge-WindowsAuthServerAllowlist {
+    param(
+        [string]$ExistingValue,
+        [Parameter(Mandatory)][string]$ServerName
+    )
+
+    $values = @(
+        @($ExistingValue -split ',')
+        $ServerName
+    ) |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique |
+        Sort-Object
+    return ($values -join ',')
+}
+
+function Set-LocalBrowserSsoPolicy {
+    param([Parameter(Mandatory)][string]$ServerName)
+
+    $edgePolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
+    New-Item -Path $edgePolicyPath -Force | Out-Null
+    $existingAllowlist = [string](Get-ItemProperty `
+        -Path $edgePolicyPath `
+        -Name 'AuthServerAllowlist' `
+        -ErrorAction SilentlyContinue).AuthServerAllowlist
+    $authServerAllowlist = Merge-WindowsAuthServerAllowlist `
+        -ExistingValue $existingAllowlist `
+        -ServerName $ServerName
+    New-ItemProperty `
+        -Path $edgePolicyPath `
+        -Name 'AuthServerAllowlist' `
+        -PropertyType String `
+        -Value $authServerAllowlist `
+        -Force | Out-Null
+
+    $zoneMapPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMapKey'
+    New-Item -Path $zoneMapPath -Force | Out-Null
+    New-ItemProperty `
+        -Path $zoneMapPath `
+        -Name "https://$ServerName" `
+        -PropertyType String `
+        -Value '1' `
+        -Force | Out-Null
+
+    Write-Host "Yerel Edge/Windows Integrated Authentication policy ayarlandi: $ServerName" -ForegroundColor DarkCyan
+    Write-Warning 'Bu ayar yalnizca yonetim sunucusuna uygulanir. Diger domain istemcilerine ayni AuthServerAllowlist ve Local Intranet zone degerlerini GPO ile dagitin; credential delegation allowlist etkinlestirmeyin.'
+}
+
 function Test-CertificateDnsName {
     param(
         [Parameter(Mandatory)][string]$CertificateName,
@@ -1108,6 +1157,14 @@ if ($AutoConfigure) {
 
 $serviceIdentity = Resolve-ServiceIdentity
 $resolvedDashboardDnsName = Resolve-DashboardDnsName -ExplicitName $DashboardDnsName
+if ($AutoConfigure) {
+    try {
+        Set-LocalBrowserSsoPolicy -ServerName $resolvedDashboardDnsName
+    }
+    catch {
+        Write-Warning "Yerel browser SSO policy ayarlanamadi; deployment devam edecek. GPO ile AuthServerAllowlist ve Local Intranet zone ayarlayin. $($_.Exception.Message)"
+    }
+}
 $resolvedTlsCertificateThumbprint = Resolve-TlsCertificateThumbprint `
     -Thumbprint $TlsCertificateThumbprint `
     -AllowInsecure $AllowInsecureHttpDashboard.IsPresent `
