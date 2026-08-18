@@ -126,17 +126,21 @@ public partial class InventoryQueryService(AuditDbContext db) : IInventoryQueryS
             query = query.Where(x => x.OfficeProducts.Any(p => p.Version != null && p.Version.Contains(officeVersion)));
         }
 
+        var rows = await query.OrderBy(x => x.DeviceName).ToListAsync(cancellationToken);
         if (pstMinBytes.HasValue)
         {
-            query = query.Where(x => x.PstFiles.Sum(p => p.SizeBytes) >= pstMinBytes.Value);
+            rows = rows
+                .Where(x => GetPstTotalBytes(x) >= pstMinBytes.Value)
+                .ToList();
         }
 
         if (pstMaxBytes.HasValue)
         {
-            query = query.Where(x => x.PstFiles.Sum(p => p.SizeBytes) <= pstMaxBytes.Value);
+            rows = rows
+                .Where(x => GetPstTotalBytes(x) <= pstMaxBytes.Value)
+                .ToList();
         }
 
-        var rows = await query.OrderBy(x => x.DeviceName).ToListAsync(cancellationToken);
         var stateByDevice = scopedStates.ToDictionary(x => x.DeviceName, StringComparer.OrdinalIgnoreCase);
         foreach (var row in rows)
         {
@@ -150,6 +154,18 @@ public partial class InventoryQueryService(AuditDbContext db) : IInventoryQueryS
         }
 
         return rows;
+    }
+
+    private static long GetPstTotalBytes(DeviceInventory device)
+    {
+        try
+        {
+            return checked(device.PstFiles.Sum(x => x.SizeBytes));
+        }
+        catch (OverflowException)
+        {
+            return long.MaxValue;
+        }
     }
 
     public async Task<List<LicenseRecommendationDto>> GetLicenseRecommendationsAsync(CancellationToken cancellationToken)
@@ -410,4 +426,3 @@ public static class MinimalPdfBuilder
 
     private static string EscapePdfText(string input) => input.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
 }
-

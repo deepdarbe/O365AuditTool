@@ -10,6 +10,7 @@ on:
       - "docs/O365-ARTIFACT-COPY-ARCHITECTURE.md"
       - "scripts/collector.ps1"
       - "scripts/Deploy-ManagementServer.ps1"
+      - "scripts/Get-O365AuditDiagnostics.ps1"
       - "scripts/Install-O365AuditTool.ps1"
       - "scripts/New-O365AuditRelease.ps1"
       - "scripts/Test-O365AuditRelease.ps1"
@@ -61,6 +62,7 @@ jobs:
           $files = @(
             '.\scripts\collector.ps1',
             '.\scripts\Deploy-ManagementServer.ps1',
+            '.\scripts\Get-O365AuditDiagnostics.ps1',
             '.\scripts\Install-O365AuditTool.ps1',
             '.\scripts\Invoke-ManualScan.ps1',
             '.\scripts\New-O365AuditRelease.ps1',
@@ -88,6 +90,7 @@ jobs:
           $files = @(
             '.\scripts\collector.ps1',
             '.\scripts\Deploy-ManagementServer.ps1',
+            '.\scripts\Get-O365AuditDiagnostics.ps1',
             '.\scripts\Install-O365AuditTool.ps1',
             '.\scripts\Invoke-ManualScan.ps1',
             '.\scripts\New-O365AuditRelease.ps1',

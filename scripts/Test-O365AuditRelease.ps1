@@ -55,6 +55,7 @@ try {
         'app/O365AuditTool.dll',
         'scripts/Deploy-ManagementServer.ps1',
         'scripts/collector.ps1',
+        'scripts/Get-O365AuditDiagnostics.ps1',
         'release-manifest.json'
     )) {
         if (-not $entries.ContainsKey($required)) {

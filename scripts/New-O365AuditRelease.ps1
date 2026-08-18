@@ -116,6 +116,8 @@ try {
         -Destination (Join-Path $scriptsRoot 'Deploy-ManagementServer.ps1') -Force
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'collector.ps1') `
         -Destination (Join-Path $scriptsRoot 'collector.ps1') -Force
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Get-O365AuditDiagnostics.ps1') `
+        -Destination (Join-Path $scriptsRoot 'Get-O365AuditDiagnostics.ps1') -Force
 
     $commit = 'uncommitted'
     try {

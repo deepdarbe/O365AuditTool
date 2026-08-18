@@ -1310,6 +1310,13 @@ try {
         throw "collector.ps1 copy SHA256 dogrulamasi basarisiz."
     }
 
+    $diagnosticsSource = Join-Path $PSScriptRoot 'Get-O365AuditDiagnostics.ps1'
+    if (Test-Path -LiteralPath $diagnosticsSource -PathType Leaf) {
+        Copy-Item -LiteralPath $diagnosticsSource `
+            -Destination (Join-Path $InstallRoot 'Get-O365AuditDiagnostics.ps1') `
+            -Force
+    }
+
     $shareReaders = @($domainComputers.Name)
     if (-not [string]::IsNullOrWhiteSpace($serviceIdentity.ShareAccount)) {
         $shareReaders += $serviceIdentity.ShareAccount
@@ -1361,6 +1368,9 @@ try {
             InventoryDays = 180
             CopyJobDays = 365
             InitialDelayMinutes = 5
+        }
+        Diagnostics = @{
+            LogDirectory = $logDir
         }
     }
     $settingsPath = Join-Path $appDir 'appsettings.Production.json'

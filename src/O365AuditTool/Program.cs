@@ -67,6 +67,7 @@ builder.Services.AddScoped<IInventoryIngestionService, InventoryIngestionService
 builder.Services.AddScoped<IInventoryQueryService, InventoryQueryService>();
 builder.Services.AddScoped<IScanJobCoordinator, ScanJobCoordinator>();
 builder.Services.AddScoped<IArtifactCopyPlanService, ArtifactCopyPlanService>();
+builder.Services.AddSingleton<IOperationalErrorLog, OperationalErrorLog>();
 builder.Services.AddHostedService<ScanOrchestratorService>();
 builder.Services.AddHostedService<ArtifactCopyService>();
 builder.Services.AddHostedService<DataRetentionService>();
@@ -108,6 +109,12 @@ app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
         .GetRequiredService<ILoggerFactory>()
         .CreateLogger("O365AuditTool.UnhandledRequest");
     logger.LogError(exception, "Unhandled request failure {TraceIdentifier}", context.TraceIdentifier);
+    context.RequestServices.GetRequiredService<IOperationalErrorLog>().Write(
+        context.TraceIdentifier,
+        context.Request.Method,
+        context.Request.Path.Value ?? string.Empty,
+        exception);
+    context.Response.Headers["X-O365Audit-TraceId"] = context.TraceIdentifier;
 
     var sqliteException = FindSqliteException(exception);
     var databaseBusy = sqliteException?.SqliteErrorCode is 5 or 6;

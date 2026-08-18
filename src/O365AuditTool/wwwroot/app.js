@@ -37,7 +37,8 @@ async function fetchJson(url, options) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     response = await fetch(url, requestOptions);
     responseText = await response.text();
-    if (response.status !== 503 || method !== "GET" || attempt === 2) {
+    const retryableServiceUnavailable = response.status === 503 && response.headers.has("Retry-After");
+    if (!retryableServiceUnavailable || method !== "GET" || attempt === 2) {
       break;
     }
     await new Promise(resolve => window.setTimeout(resolve, 600 * (attempt + 1)));
@@ -106,10 +107,11 @@ async function loadDirectoryStructure() {
       item => item.distinguishedName,
       item => `${"\u00a0\u00a0".repeat(Math.max(0, Number(item.depth || 1) - 1))}${item.displayName || item.name}`);
     replaceScopeOptions("fSite", sites, "Tüm AD siteleri / seçim yapın", item => item.name, item => item.name);
+    const warnings = Array.isArray(structure?.warnings) ? structure.warnings.filter(Boolean) : [];
     setFeedback(
       "directoryFeedback",
-      `${organizationalUnits.length} OU ve ${sites.length} AD site yüklendi · ${structure.domainDistinguishedName || "domain"}`,
-      "ok");
+      `${organizationalUnits.length} OU ve ${sites.length} AD site yüklendi · ${structure.domainDistinguishedName || "domain"}${warnings.length ? ` · ${warnings.join(" ")}` : ""}`,
+      warnings.length ? "warning" : "ok");
   } catch (error) {
     byId("fOu").disabled = true;
     byId("fSite").disabled = true;

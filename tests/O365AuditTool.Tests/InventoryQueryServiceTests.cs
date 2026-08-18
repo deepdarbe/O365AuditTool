@@ -97,4 +97,61 @@ public sealed class InventoryQueryServiceTests
         Assert.Equal("user@contoso.local", recommendation.UserKey);
         Assert.Equal("Low", recommendation.Confidence);
     }
+
+    [Fact]
+    public async Task PstRangeFilter_HandlesDevicesWithAndWithoutPstData()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AuditDbContext>()
+            .UseSqlite(connection)
+            .Options;
+
+        await using var db = new AuditDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var job = new ScanJob { Status = JobStatus.Completed };
+        db.ScanJobs.Add(job);
+        db.Devices.Add(new DeviceInventory
+        {
+            ScanJobId = job.Id,
+            DeviceName = "PC-NO-PST",
+            CollectedUtc = DateTime.UtcNow,
+            Status = DeviceScanStatus.Success,
+            RawPayloadJson = "{\"schemaVersion\":\"1.2\"}"
+        });
+        db.Devices.Add(new DeviceInventory
+        {
+            ScanJobId = job.Id,
+            DeviceName = "PC-25GB",
+            CollectedUtc = DateTime.UtcNow,
+            Status = DeviceScanStatus.Success,
+            RawPayloadJson = "{\"schemaVersion\":\"1.2\"}",
+            PstFiles =
+            {
+                new PstFileRecord
+                {
+                    Sid = "S-1-5-21-1001",
+                    Path = @"C:\Users\user\mail.pst",
+                    SizeBytes = 25L * 1024 * 1024 * 1024,
+                    ExistsOnDisk = true
+                }
+            }
+        });
+        await db.SaveChangesAsync();
+
+        var service = new InventoryQueryService(db);
+        var allToOneHundredGb = await service.GetLatestDevicesAsync(
+            null, null, null, null, null, null, null,
+            0,
+            100L * 1024 * 1024 * 1024,
+            CancellationToken.None);
+        var tenToOneHundredGb = await service.GetLatestDevicesAsync(
+            null, null, null, null, null, null, null,
+            10L * 1024 * 1024 * 1024,
+            100L * 1024 * 1024 * 1024,
+            CancellationToken.None);
+
+        Assert.Equal(2, allToOneHundredGb.Count);
+        Assert.Equal("PC-25GB", Assert.Single(tenToOneHundredGb).DeviceName);
+    }
 }

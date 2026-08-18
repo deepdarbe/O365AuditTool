@@ -9,6 +9,7 @@ namespace O365AuditTool.Controllers;
 [Authorize(Policy = "AuditReader")]
 public sealed class DirectoryController(
     IActiveDirectoryStructureProvider structureProvider,
+    IOperationalErrorLog operationalErrorLog,
     ILogger<DirectoryController> logger) : ControllerBase
 {
     [HttpGet("structure")]
@@ -25,10 +26,16 @@ public sealed class DirectoryController(
         catch (ActiveDirectoryStructureDiscoveryException ex)
         {
             logger.LogError(ex, "Active Directory OU/site structure could not be loaded");
+            operationalErrorLog.Write(
+                HttpContext.TraceIdentifier,
+                Request.Method,
+                Request.Path.Value ?? string.Empty,
+                ex);
+            Response.Headers["X-O365Audit-TraceId"] = HttpContext.TraceIdentifier;
             return Problem(
                 statusCode: StatusCodes.Status503ServiceUnavailable,
                 title: "Active Directory yapısı yüklenemedi",
-                detail: "Domain bağlantısını ve O365AuditTool servis hesabının AD okuma yetkisini kontrol edin.");
+                detail: $"Domain bağlantısını ve O365AuditTool servis hesabının AD okuma yetkisini kontrol edin. İzleme kodu: {HttpContext.TraceIdentifier}");
         }
     }
 }

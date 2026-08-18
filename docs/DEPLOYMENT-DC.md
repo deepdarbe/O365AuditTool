@@ -359,6 +359,19 @@ Set-Location $repoRoot
 
 ## Sorun Giderme
 
+Dashboard bir izleme kodu gosterirse kurulumla gelen tanı scripti servis, health, SQLite ve yerel hata kaydini birlikte okur:
+
+```powershell
+& C:\temp\o365audit\Get-O365AuditDiagnostics.ps1 `
+  -TraceIdentifier '0HNNTC9S007EL:00000003' |
+  Format-List
+```
+
+API istisnalari varsayilan olarak `C:\temp\o365audit\logs\server-errors-YYYYMMDD.jsonl` dosyasina yazilir. Bu dizin yalniz servis kimligi, LocalSystem ve yerel yoneticiler tarafindan okunabilen deployment ACL'lerini kullanir.
+
+- OU/site listesi yuklenmiyor: OU ve site LDAP sorgulari bagimsizdir. Site sorgusu hata verse de OU listesi gosterilir; dogrudan OU sorgusu hata verirse bilgisayar nesnelerinin distinguished name degerlerinden OU agaci uretilir. Servis kimliginin RootDSE, domain OU ve computer nesnelerine read erisimini kontrol edin.
+- OU listesi uzun sure `yukleniyor` durumunda: LDAP sorgulari sure sinirlidir ve kalici AD 503 yanitlari istemcide tekrar denenmez. Yukaridaki tanı scriptiyle en son exception chain bilgisini alin.
+
 - `dotnet bulunamadi`: Kaynak deployment icin .NET 10 SDK veya framework-dependent servis icin ASP.NET Core Runtime 10 kurulu degildir.
 - `PsExec imzasi gecerli degil`: Resmi Sysinternals binary'sini yeniden indirin; dosya ozelliklerinden dijital imzayi kontrol edin.
 - `Test-ADServiceAccount False`: Yonetim sunucusu gMSA parolasini alma yetkisine sahip degildir veya gMSA yerel olarak kurulmamisti.

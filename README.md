@@ -162,7 +162,7 @@ Plan olusturmak kopyalamayi baslatmaz. Dashboard'da plan hedefi ve oge sayisi in
 - `GET /api/copy/plans`: Planlari ve durumlarini listeler.
 - `POST /api/copy/plans/{id}/execute`: Daha once olusturulmus plani yurutme kuyruguna alir.
 
-Dashboard cihaz, OU, AD site, kullanici, disk tipi, Office surumu, durum ve PST boyut araligi filtrelerini CSV/PDF export'a aynen tasir. Profil loaded/default, aktif hesap, Office process owner/PID, volume free/total ve guncel scan hatasi ayrintilari merkezi tabloda gorunur.
+Dashboard cihaz, AD'den otomatik yuklenen OU/site, kullanici, disk tipi, Office surumu, durum ve PST boyut araligi filtrelerini CSV/PDF export'a aynen tasir. Site sorgusu basarisizsa OU listesi kullanilabilir kalir; dogrudan OU kesfi basarisizsa bilgisayar DN'lerinden kapsam agaci uretilir. Profil loaded/default, aktif hesap, Office process owner/PID, volume free/total ve guncel scan hatasi ayrintilari merkezi tabloda gorunur.
 
 Endpoint local Administrator/ADMIN$/SCM yetkileri, SMB collector izinleri, gMSA hazirligi ve sorun giderme icin [domain deployment rehberine](docs/DEPLOYMENT-DC.md) bakin.
 

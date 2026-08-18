@@ -1,6 +1,5 @@
 using System.DirectoryServices;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 
 [assembly: InternalsVisibleTo("O365AuditTool.Tests")]
 
@@ -192,6 +191,8 @@ internal interface IActiveDirectoryComputerSource
 
 internal sealed class DirectoryServicesComputerSource : IActiveDirectoryComputerSource
 {
+    private static readonly TimeSpan SearchTimeout = TimeSpan.FromSeconds(15);
+
     internal const string ComputerFilter =
         "(&(objectCategory=computer)(objectClass=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))";
 
@@ -205,7 +206,10 @@ internal sealed class DirectoryServicesComputerSource : IActiveDirectoryComputer
             using var searcher = new DirectorySearcher(root)
             {
                 Filter = ComputerFilter,
-                PageSize = 1000
+                PageSize = 1000,
+                ClientTimeout = SearchTimeout,
+                ServerTimeLimit = SearchTimeout,
+                ReferralChasing = ReferralChasingOption.None
             };
 
             searcher.PropertiesToLoad.Add("name");
@@ -242,10 +246,7 @@ internal sealed class DirectoryServicesComputerSource : IActiveDirectoryComputer
         {
             throw;
         }
-        catch (Exception ex) when (ex is DirectoryServicesCOMException or
-                                   COMException or
-                                   InvalidOperationException or
-                                   UnauthorizedAccessException)
+        catch (Exception ex) when (ex is not OutOfMemoryException and not AccessViolationException)
         {
             throw new ActiveDirectoryDiscoveryException("Active Directory computer discovery failed.", ex);
         }
