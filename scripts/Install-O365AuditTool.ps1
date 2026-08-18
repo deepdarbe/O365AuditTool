@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
-    [string]$BundleUri,
+    [string]$BundleUri = "",
 
     [string]$ExpectedSha256 = "",
     [string]$ChecksumUri = "",
@@ -13,12 +12,19 @@ param(
     [string]$ServiceName = 'O365AuditTool',
     [ValidateRange(1, 65535)]
     [int]$Port = 5080,
+    [ValidateRange(1, 65535)]
+    [int]$HealthPort = 5081,
+    [string]$DashboardDnsName = "",
+    [string]$TlsCertificateThumbprint = "",
+    [switch]$AllowInsecureHttpDashboard,
     [string]$PsExecPath = 'C:\Tools\PsExec\PsExec64.exe',
     [bool]$DownloadPsExecIfMissing = $true,
-    [string]$CollectorSharePath = 'C:\temp\o365audit\share',
+    [string]$CollectorSharePath = '',
     [string]$CollectorShareName = 'o365audit',
     [string]$DomainComputersGroup = "",
     [string[]]$FallbackTargets = @(),
+    [string]$DefaultOuFilter = "",
+    [string]$DefaultSiteFilter = "",
     [string[]]$AuditAdminGroups = @(),
     [string[]]$AuditReaderGroups = @(),
     [string[]]$MigrationPlannerGroups = @(),
@@ -28,10 +34,16 @@ param(
     [switch]$EnableArtifactCopy,
     [string]$CopyTargetRoot = "",
     [string[]]$AllowedCopyTargetRoots = @(),
-    [switch]$CopyVerifySha256
+    [string[]]$AllowedCopySourceUncRoots = @(),
+    [switch]$CopyVerifySha256,
+    [switch]$DisableCopySha256,
+    [switch]$FunctionsOnly
 )
 
 $ErrorActionPreference = 'Stop'
+if ($CopyVerifySha256 -and $DisableCopySha256) {
+    throw 'CopyVerifySha256 ve DisableCopySha256 birlikte kullanilamaz.'
+}
 
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -39,6 +51,107 @@ function Assert-Administrator {
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw "Bootstrap Administrator yetkisi ile calistirilmalidir."
     }
+}
+
+function Assert-NoReparsePointInPath {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $root = [IO.Path]::GetPathRoot($fullPath)
+    $current = $root
+    foreach ($segment in $fullPath.Substring($root.Length).Split([char[]]'\/', [StringSplitOptions]::RemoveEmptyEntries)) {
+        $current = Join-Path $current $segment
+        if (-not (Test-Path -LiteralPath $current)) {
+            continue
+        }
+
+        $item = Get-Item -LiteralPath $current -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Bootstrap path reparse point iceremez: '$current'."
+        }
+    }
+}
+
+function New-PrivateDirectoryAcl {
+    $administratorsSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
+    $systemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $none = [Security.AccessControl.PropagationFlags]::None
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+    $acl = New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @($administratorsSid, $systemSid, $currentSid)) {
+        $null = $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            $none,
+            $allow)))
+    }
+
+    return $acl
+}
+
+function New-DirectoryWithAcl {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][Security.AccessControl.DirectorySecurity]$Acl
+    )
+
+    $directoryInfo = New-Object IO.DirectoryInfo($Path)
+    $aclOverload = [IO.DirectoryInfo].GetMethods() |
+        Where-Object {
+            $_.Name -eq 'Create' -and
+            $_.GetParameters().Count -eq 1 -and
+            $_.GetParameters()[0].ParameterType -eq [Security.AccessControl.DirectorySecurity]
+        } |
+        Select-Object -First 1
+    if ($null -ne $aclOverload) {
+        $directoryInfo.Create($Acl)
+        return
+    }
+
+    [IO.FileSystemAclExtensions]::CreateDirectory($Acl, $Path) | Out-Null
+}
+
+function Set-DirectoryAcl {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][Security.AccessControl.DirectorySecurity]$Acl
+    )
+
+    $directoryInfo = New-Object IO.DirectoryInfo($Path)
+    $setAclMethod = [IO.DirectoryInfo].GetMethods() |
+        Where-Object {
+            $_.Name -eq 'SetAccessControl' -and
+            $_.GetParameters().Count -eq 1 -and
+            $_.GetParameters()[0].ParameterType -eq [Security.AccessControl.DirectorySecurity]
+        } |
+        Select-Object -First 1
+    if ($null -ne $setAclMethod) {
+        $directoryInfo.SetAccessControl($Acl)
+        return
+    }
+
+    [IO.FileSystemAclExtensions]::SetAccessControl($directoryInfo, $Acl)
+}
+
+function Initialize-PrivateDirectory {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $parent = Split-Path $Path -Parent
+    Assert-NoReparsePointInPath -Path $parent
+    $acl = New-PrivateDirectoryAcl
+    if (Test-Path -LiteralPath $Path) {
+        Assert-NoReparsePointInPath -Path $Path
+        Set-DirectoryAcl -Path $Path -Acl $acl
+    }
+    else {
+        New-DirectoryWithAcl -Path $Path -Acl $acl
+    }
+    Assert-NoReparsePointInPath -Path $Path
+    Set-DirectoryAcl -Path $Path -Acl $acl
 }
 
 function Assert-DownloadLocation {
@@ -183,19 +296,26 @@ function Assert-BundleManifest {
     }
 }
 
+if ($FunctionsOnly) { return }
+if ([string]::IsNullOrWhiteSpace($BundleUri)) {
+    throw 'BundleUri zorunludur.'
+}
+
 Assert-Administrator
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Assert-DownloadLocation -Location $BundleUri -Name 'BundleUri'
 $PsExecPath = [IO.Path]::GetFullPath($PsExecPath)
 
-$bootstrapParent = [IO.Path]::GetFullPath('C:\temp\o365audit-bootstrap')
-New-Item -ItemType Directory -Path $bootstrapParent -Force | Out-Null
+$bootstrapProductRoot = [IO.Path]::GetFullPath((Join-Path $env:ProgramData 'O365AuditTool'))
+Initialize-PrivateDirectory -Path $bootstrapProductRoot
+$bootstrapParent = Join-Path $bootstrapProductRoot 'bootstrap'
+Initialize-PrivateDirectory -Path $bootstrapParent
 $bootstrapRoot = Join-Path $bootstrapParent ([Guid]::NewGuid().ToString('N'))
 $archivePath = Join-Path $bootstrapRoot 'O365AuditTool.zip'
 $extractPath = Join-Path $bootstrapRoot 'extracted'
 
 try {
-    New-Item -ItemType Directory -Path $bootstrapRoot -Force | Out-Null
+    Initialize-PrivateDirectory -Path $bootstrapRoot
     $expectedHash = Get-ExpectedHash `
         -ExplicitHash $ExpectedSha256 `
         -HashLocation $ChecksumUri `
@@ -226,17 +346,23 @@ try {
         InstallRoot = $InstallRoot
         ServiceName = $ServiceName
         Port = $Port
+        HealthPort = $HealthPort
+        DashboardDnsName = $DashboardDnsName
+        TlsCertificateThumbprint = $TlsCertificateThumbprint
         PsExecPath = $PsExecPath
         CollectorSharePath = $CollectorSharePath
         CollectorShareName = $CollectorShareName
         DomainComputersGroup = $DomainComputersGroup
         FallbackTargets = $FallbackTargets
+        DefaultOuFilter = $DefaultOuFilter
+        DefaultSiteFilter = $DefaultSiteFilter
         AuditAdminGroups = $AuditAdminGroups
         AuditReaderGroups = $AuditReaderGroups
         MigrationPlannerGroups = $MigrationPlannerGroups
         GmsaAccount = $GmsaAccount
         CopyTargetRoot = $CopyTargetRoot
         AllowedCopyTargetRoots = $AllowedCopyTargetRoots
+        AllowedCopySourceUncRoots = $AllowedCopySourceUncRoots
     }
     if ($PSBoundParameters.ContainsKey('ServiceCredential')) {
         $deployArguments.ServiceCredential = $ServiceCredential
@@ -244,13 +370,21 @@ try {
     if ($AllowLocalSystem) {
         $deployArguments.AllowLocalSystem = $true
     }
+    if ($AllowInsecureHttpDashboard) {
+        $deployArguments.AllowInsecureHttpDashboard = $true
+    }
     if ($EnableArtifactCopy) {
         $deployArguments.EnableArtifactCopy = $true
     }
     if ($CopyVerifySha256) {
         $deployArguments.CopyVerifySha256 = $true
     }
+    if ($DisableCopySha256) {
+        $deployArguments.DisableCopySha256 = $true
+    }
 
+    Assert-NoReparsePointInPath -Path $extractPath
+    Assert-BundleManifest -BundleRoot $extractPath -Manifest $manifest
     & $deployScript @deployArguments
     if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
         throw "Deployment script hata kodu ile tamamlandi: $LASTEXITCODE."

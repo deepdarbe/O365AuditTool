@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using O365AuditTool.Services;
 using Xunit;
 
@@ -17,11 +18,46 @@ public class ArtifactCopyPathTests
     }
 
     [Fact]
-    public void ToAdministrativeShare_LeavesValidUncPathUnchanged()
+    public void ToAdministrativeShare_RejectsUncPathByDefault()
     {
         const string source = @"\\fileserver\profiles\ali\mail.pst";
 
-        Assert.Equal(source, ArtifactCopyPath.ToAdministrativeShare("PC-001", source));
+        var exception = Assert.Throws<ArtifactCopyValidationException>(
+            () => ArtifactCopyPath.ToAdministrativeShare("PC-001", source));
+
+        Assert.Contains("AllowedSourceUncRoots", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ToAdministrativeShare_AllowsOnlyConfiguredUncRoot()
+    {
+        const string source = @"\\fileserver\profiles\ali\mail.pst";
+
+        var result = ArtifactCopyPath.ToAdministrativeShare(
+            "PC-001",
+            source,
+            "PST",
+            [@"\\fileserver\profiles"]);
+
+        Assert.Equal(source, result);
+        Assert.Throws<ArtifactCopyValidationException>(() =>
+            ArtifactCopyPath.ToAdministrativeShare(
+                "PC-001",
+                @"\\fileserver\profiles-evil\ali\mail.pst",
+                "PST",
+                [@"\\fileserver\profiles"]));
+    }
+
+    [Theory]
+    [InlineData(@"C:\Users\ali\mail.exe", "PST")]
+    [InlineData(@"C:\Users\ali\mail.nk2", "PST")]
+    [InlineData(@"C:\Users\ali\mail.pst", "UNKNOWN")]
+    public void ToAdministrativeShare_RejectsUnsupportedOrMismatchedArtifactType(
+        string source,
+        string artifactType)
+    {
+        Assert.Throws<ArtifactCopyValidationException>(() =>
+            ArtifactCopyPath.ToAdministrativeShare("PC-001", source, artifactType));
     }
 
     [Theory]
@@ -140,5 +176,76 @@ public class ArtifactCopyPathTests
 
         Assert.False(result);
         Assert.Contains("AllowedTargetRoots", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TryValidateAllowedRoot_RejectsExistingReparsePointInDestinationChain()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"o365-copy-root-{Guid.NewGuid():N}");
+        var outsideRoot = Path.Combine(Path.GetTempPath(), $"o365-copy-outside-{Guid.NewGuid():N}");
+        var linkPath = Path.Combine(testRoot, "linked");
+        Directory.CreateDirectory(testRoot);
+        Directory.CreateDirectory(outsideRoot);
+
+        try
+        {
+            CreateDirectoryLink(linkPath, outsideRoot);
+
+            var result = ArtifactCopyPath.TryValidateAllowedRoot(
+                Path.Combine(linkPath, "mail.pst"),
+                [testRoot],
+                out _,
+                out var error);
+
+            Assert.False(result);
+            Assert.Contains("reparse point", error, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            if (Directory.Exists(linkPath))
+            {
+                Directory.Delete(linkPath);
+            }
+
+            Directory.Delete(testRoot, recursive: true);
+            Directory.Delete(outsideRoot, recursive: true);
+        }
+    }
+
+    private static void CreateDirectoryLink(string linkPath, string targetPath)
+    {
+        try
+        {
+            Directory.CreateSymbolicLink(linkPath, targetPath);
+            return;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            // Directory junctions do not require the Windows symbolic-link privilege.
+        }
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        startInfo.ArgumentList.Add("/d");
+        startInfo.ArgumentList.Add("/c");
+        startInfo.ArgumentList.Add("mklink");
+        startInfo.ArgumentList.Add("/J");
+        startInfo.ArgumentList.Add(linkPath);
+        startInfo.ArgumentList.Add(targetPath);
+
+        using var process = Process.Start(startInfo);
+        Assert.NotNull(process);
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        Assert.True(
+            process.ExitCode == 0,
+            $"Unable to create test junction. Output: {output} Error: {error}");
     }
 }

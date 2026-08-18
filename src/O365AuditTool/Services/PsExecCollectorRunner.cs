@@ -5,7 +5,12 @@ using O365AuditTool.Models;
 
 namespace O365AuditTool.Services;
 
-public record CollectResult(bool Success, CollectorPayload? Payload, string? ErrorMessage, bool IsOffline);
+public record CollectResult(
+    bool Success,
+    CollectorPayload? Payload,
+    string? ErrorMessage,
+    bool IsOffline,
+    bool IsTimedOut = false);
 
 public interface IRemoteCollectorRunner
 {
@@ -77,6 +82,7 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
                     false,
                     null,
                     $"Collector timed out after {_options.DeviceTimeoutSeconds} seconds.",
+                    false,
                     true);
             }
 
@@ -86,9 +92,7 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
             if (process.ExitCode != 0)
             {
                 var error = string.IsNullOrWhiteSpace(stderr) ? "PsExec command failed." : stderr.Trim();
-                var offline = error.Contains("network path was not found", StringComparison.OrdinalIgnoreCase) ||
-                              error.Contains("timed out", StringComparison.OrdinalIgnoreCase) ||
-                              error.Contains("could not start", StringComparison.OrdinalIgnoreCase);
+                var offline = IsOfflineFailure(process.ExitCode, error);
                 return new CollectResult(false, null, error, offline);
             }
 
@@ -106,6 +110,11 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
             if (payload is null)
             {
                 return new CollectResult(false, null, "Collector JSON could not be parsed.", false);
+            }
+
+            if (!TryNormalizePayload(payload, deviceName, out var payloadError))
+            {
+                return new CollectResult(false, null, payloadError, false);
             }
 
             return new CollectResult(true, payload, null, false);
@@ -136,6 +145,77 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
         {
             logger.LogWarning(ex, "Failed to kill timed-out PsExec process for {Device}", deviceName);
         }
+    }
+
+    internal static bool IsOfflineFailure(int exitCode, string error)
+    {
+        int[] transientNetworkCodes = [53, 64, 67, 121, 1231, 1232, 1460, 1722, 1726];
+        if (transientNetworkCodes.Contains(exitCode))
+        {
+            return true;
+        }
+
+        string[] markers =
+        [
+            "network path was not found",
+            "network name is no longer available",
+            "network location cannot be reached",
+            "no such host is known",
+            "host is unreachable",
+            "rpc server is unavailable",
+            "timed out",
+            "could not start",
+            "couldn't access",
+            "ağ yolu bulunamadı",
+            "rpc sunucusu kullanılamıyor",
+            "ana bilgisayar bilinmiyor"
+        ];
+        return markers.Any(marker => error.Contains(marker, StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal static bool TryNormalizePayload(
+        CollectorPayload payload,
+        string expectedDeviceName,
+        out string error)
+    {
+        if (payload.Device is null || string.IsNullOrWhiteSpace(payload.Device.Hostname))
+        {
+            error = "Collector payload does not contain a device hostname.";
+            return false;
+        }
+
+        var expectedHost = expectedDeviceName.Trim().TrimStart('\\').Split('.')[0];
+        var reportedHost = payload.Device.Hostname.Trim().Split('.')[0];
+        if (!string.Equals(expectedHost, reportedHost, StringComparison.OrdinalIgnoreCase))
+        {
+            error = $"Collector hostname mismatch. Expected '{expectedDeviceName}', received '{payload.Device.Hostname}'.";
+            return false;
+        }
+
+        var majorVersion = payload.SchemaVersion?.Split('.')[0];
+        if (!string.Equals(majorVersion, "1", StringComparison.Ordinal))
+        {
+            error = $"Unsupported collector schema version '{payload.SchemaVersion ?? "missing"}'.";
+            return false;
+        }
+
+        payload.Device.Hostname = payload.Device.Hostname.Trim();
+        payload.Device.Ips ??= [];
+        payload.Storage ??= new CollectorStorage();
+        payload.Storage.Volumes ??= [];
+        payload.Storage.Disks ??= [];
+        payload.Office ??= new CollectorOffice();
+        payload.Office.InstalledProducts ??= [];
+        payload.Office.RunningProcesses ??= [];
+        payload.Profiles ??= [];
+        payload.MailAccounts ??= [];
+        payload.PstFiles ??= [];
+        payload.LegacyFiles ??= [];
+        payload.ScanMeta ??= new CollectorScanMeta();
+        payload.Errors ??= [];
+
+        error = string.Empty;
+        return true;
     }
 
     private static string? ExtractJsonObject(string raw)

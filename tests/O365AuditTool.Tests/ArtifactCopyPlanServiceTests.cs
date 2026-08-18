@@ -11,6 +11,47 @@ namespace O365AuditTool.Tests;
 public class ArtifactCopyPlanServiceTests
 {
     [Fact]
+    public async Task CreatePlan_RejectsSamePhysicalArtifactWithDifferentOwners()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var dbOptions = new DbContextOptionsBuilder<AuditDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AuditDbContext(dbOptions);
+        await db.Database.EnsureCreatedAsync();
+
+        var scanJob = new ScanJob();
+        scanJob.Devices.Add(new DeviceInventory
+        {
+            ScanJobId = scanJob.Id,
+            DeviceName = "PC-01",
+            CollectedUtc = DateTime.UtcNow,
+            Status = DeviceScanStatus.Success,
+            RawPayloadJson = "{}",
+            PstFiles =
+            [
+                new PstFileRecord { Sid = "SID-A", UserPrincipalName = "a@example.com", ProfileName = "A", Path = @"C:\Shared\mail.pst", SizeBytes = 10, ExistsOnDisk = true },
+                new PstFileRecord { Sid = "SID-B", UserPrincipalName = "b@example.com", ProfileName = "B", Path = @"C:\Shared\mail.pst", SizeBytes = 10, ExistsOnDisk = true }
+            ]
+        });
+        db.ScanJobs.Add(scanJob);
+        await db.SaveChangesAsync();
+
+        var service = new ArtifactCopyPlanService(
+            db,
+            Options.Create(new CopyOptions { DefaultTargetRoot = @"C:\MigrationRoot" }));
+
+        var exception = await Assert.ThrowsAsync<ArtifactCopyValidationException>(() =>
+            service.CreatePlanAsync(
+                new CreateCopyPlanRequest(null, null, null, ["PST"]),
+                @"CONTOSO\planner",
+                CancellationToken.None));
+
+        Assert.Contains("ownership is ambiguous", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task CreatePlan_UsesLatestUsableSnapshotAndBuildsAccountDeviceProfileHierarchy()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -38,6 +79,13 @@ public class ArtifactCopyPlanServiceTests
                     ProfileName = "Outlook",
                     Address = "ada@example.com",
                     AccountType = "Exchange"
+                },
+                new MailAccount
+                {
+                    Sid = "S-1-5-21-100",
+                    ProfileName = "Archive",
+                    Address = "archive@example.com",
+                    AccountType = "IMAP"
                 }
             ],
             PstFiles =
@@ -45,7 +93,8 @@ public class ArtifactCopyPlanServiceTests
                 new PstFileRecord
                 {
                     Sid = "S-1-5-21-100",
-                    UserPrincipalName = "ada@example.com",
+                    UserPrincipalName = null,
+                    ProfileName = "Outlook",
                     Path = @"C:\Users\Ada\Documents\Outlook Files\archive.pst",
                     SizeBytes = 1024,
                     ExistsOnDisk = true,

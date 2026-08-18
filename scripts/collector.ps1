@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param()
+param([switch]$FunctionsOnly)
 
 $ErrorActionPreference = 'Stop'
 
@@ -11,11 +11,24 @@ function Convert-ToMediaType {
         [string]$BusType
     )
 
-    $text = @($InterfaceType, $Model, $MediaHint, $BusType) -join ' '
-    if ($text -match 'NVMe') { return 'NVMe' }
-    if ($text -match 'SSD|Solid State') { return 'SSD' }
-    if ($text -match 'SATA') { return 'SATA' }
-    if ($text -match 'SCSI|RAID|SAS') { return 'SATA' }
+    $text = @($Model, $MediaHint) -join ' '
+    if ($text -match 'SSD|Solid State' -or $BusType -match 'NVMe') { return 'SSD' }
+    if ($text -match 'HDD|Hard Disk|Fixed hard disk') { return 'HDD' }
+    return 'Unknown'
+}
+
+function Convert-ToBusType {
+    param(
+        [string]$InterfaceType,
+        [string]$Model,
+        [string]$BusType
+    )
+
+    $text = @($BusType, $InterfaceType, $Model) -join ' '
+    foreach ($candidate in @('NVMe', 'SATA', 'SAS', 'USB', 'RAID', 'SCSI', 'IDE', 'Virtual')) {
+        if ($text -match [regex]::Escape($candidate)) { return $candidate }
+    }
+
     return 'Unknown'
 }
 
@@ -23,15 +36,43 @@ function Get-DeviceInfo {
     $os = Get-CimInstance Win32_OperatingSystem
     $cs = Get-CimInstance Win32_ComputerSystem
     $bios = Get-CimInstance Win32_BIOS
-    $ips = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object { $_.IPAddress -notlike '169.254*' -and $_.IPAddress -ne '127.0.0.1' } |
-        Select-Object -ExpandProperty IPAddress -Unique
+    $ips = @()
+    try {
+        $ips = @(Get-NetIPConfiguration -ErrorAction Stop |
+            Where-Object { $_.NetAdapter.Status -eq 'Up' -and -not [bool]$_.NetAdapter.Virtual } |
+            ForEach-Object { @($_.IPv4Address) } |
+            Where-Object { $_.IPAddress -notlike '169.254*' -and $_.IPAddress -ne '127.0.0.1' } |
+            Select-Object -ExpandProperty IPAddress -Unique)
+    }
+    catch {
+        $ips = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.AddressState -eq 'Preferred' -and
+                $_.IPAddress -notlike '169.254*' -and
+                $_.IPAddress -ne '127.0.0.1'
+            } |
+            Select-Object -ExpandProperty IPAddress -Unique)
+    }
+
+    $currentLoggedOnUser = [string]$cs.UserName
+    $lastLoggedOnUser = $null
+    try {
+        $lastLoggedOnUser = [string](Get-ItemProperty `
+            -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI' `
+            -Name LastLoggedOnUser `
+            -ErrorAction Stop).LastLoggedOnUser
+    }
+    catch {}
+    if ([string]::IsNullOrWhiteSpace($lastLoggedOnUser)) {
+        $lastLoggedOnUser = $currentLoggedOnUser
+    }
 
     [pscustomobject]@{
         hostname = $env:COMPUTERNAME
         serialNumber = $bios.SerialNumber
         os = "$($os.Caption) $($os.Version)"
-        lastLoggedOnUser = $cs.UserName
+        lastLoggedOnUser = $lastLoggedOnUser
+        currentLoggedOnUser = $currentLoggedOnUser
         ips = @($ips)
         ou = $null
         site = $null
@@ -55,10 +96,12 @@ function Get-StorageInfo {
         foreach ($d in $physical) {
             $bus = [string]$d.BusType
             $mediaHint = [string]$d.MediaType
-            $mediaType = Convert-ToMediaType -InterfaceType $bus -Model $d.FriendlyName -MediaHint $mediaHint -BusType $bus
+            $busType = Convert-ToBusType -InterfaceType $bus -Model $d.FriendlyName -BusType $bus
+            $mediaType = Convert-ToMediaType -InterfaceType $bus -Model $d.FriendlyName -MediaHint $mediaHint -BusType $busType
             $disks += [pscustomobject]@{
                 model = $d.FriendlyName
                 interfaceType = $bus
+                busType = $busType
                 mediaType = $mediaType
                 sizeBytes = [int64]$d.Size
             }
@@ -67,10 +110,12 @@ function Get-StorageInfo {
     catch {
         $legacy = Get-CimInstance Win32_DiskDrive
         foreach ($d in $legacy) {
-            $mediaType = Convert-ToMediaType -InterfaceType $d.InterfaceType -Model $d.Model -MediaHint $d.MediaType -BusType ''
+            $busType = Convert-ToBusType -InterfaceType $d.InterfaceType -Model $d.Model -BusType ''
+            $mediaType = Convert-ToMediaType -InterfaceType $d.InterfaceType -Model $d.Model -MediaHint $d.MediaType -BusType $busType
             $disks += [pscustomobject]@{
                 model = $d.Model
                 interfaceType = $d.InterfaceType
+                busType = $busType
                 mediaType = $mediaType
                 sizeBytes = [int64]$d.Size
             }
@@ -83,52 +128,119 @@ function Get-StorageInfo {
     }
 }
 
+function Get-OfficeProcessOwner {
+    param([Parameter(Mandatory)][int]$ProcessId)
+
+    try {
+        $cimProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+        $owner = Invoke-CimMethod -InputObject $cimProcess -MethodName GetOwner -ErrorAction Stop
+        if ($owner.ReturnValue -eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$owner.User)) {
+            if ([string]::IsNullOrWhiteSpace([string]$owner.Domain)) {
+                return [string]$owner.User
+            }
+
+            return "$($owner.Domain)\$($owner.User)"
+        }
+    }
+    catch {}
+
+    return $null
+}
+
 function Get-OfficeInfo {
     $regPaths = @(
         'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
         'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
     )
 
-    $products = foreach ($path in $regPaths) {
-        Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.DisplayName -and (
-                    $_.DisplayName -match 'Microsoft 365' -or
-                    $_.DisplayName -match 'Microsoft Office' -or
-                    $_.DisplayName -match 'Office 2016' -or
-                    $_.DisplayName -match 'Office 2019' -or
-                    $_.DisplayName -match 'Office 2021'
-                )
-            } |
-            Select-Object @{n='name';e={$_.DisplayName}}, @{n='version';e={$_.DisplayVersion}}, @{n='installType';e={$_.ReleaseType}}
+    $products = @()
+    foreach ($path in $regPaths) {
+        foreach ($product in @(Get-ItemProperty -Path $path -ErrorAction SilentlyContinue)) {
+            if (-not $product.DisplayName -or $product.DisplayName -notmatch 'Microsoft 365|Microsoft Office|Office (?:2016|2019|2021|2024|LTSC)') {
+                continue
+            }
+
+            $products += [pscustomobject]@{
+                name = [string]$product.DisplayName
+                version = [string]$product.DisplayVersion
+                installType = [string]$product.ReleaseType
+                architecture = if ($path -match 'WOW6432Node') { 'x86' } else { $null }
+                updateChannel = $null
+                productIds = $null
+                updatesEnabled = $null
+            }
+        }
+    }
+
+    $clickToRunPath = 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
+    $clickToRun = Get-ItemProperty -LiteralPath $clickToRunPath -ErrorAction SilentlyContinue
+    if ($null -ne $clickToRun) {
+        $updatesEnabled = $null
+        if ($null -ne $clickToRun.UpdatesEnabled) {
+            $updatesEnabled = [string]$clickToRun.UpdatesEnabled -notmatch '^(?:0|false)$'
+        }
+
+        $version = [string]$clickToRun.VersionToReport
+        if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = [string]$clickToRun.ClientVersionToReport
+        }
+        $updateChannel = [string]$clickToRun.UpdateChannel
+        if ([string]::IsNullOrWhiteSpace($updateChannel)) {
+            $updateChannel = [string]$clickToRun.CDNBaseUrl
+        }
+
+        $products += [pscustomobject]@{
+            name = 'Microsoft Office Click-to-Run'
+            version = $version
+            installType = 'ClickToRun'
+            architecture = [string]$clickToRun.Platform
+            updateChannel = $updateChannel
+            productIds = [string]$clickToRun.ProductReleaseIds
+            updatesEnabled = $updatesEnabled
+        }
     }
 
     $targetProcesses = @('OUTLOOK', 'WINWORD', 'EXCEL')
     $running = @()
     foreach ($name in $targetProcesses) {
-        $p = Get-Process -Name $name -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($null -eq $p) {
+        $processes = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+        if ($processes.Count -eq 0) {
             $running += [pscustomobject]@{
                 processName = $name
                 pid = $null
                 startTimeUtc = $null
                 isRunning = $false
+                owner = $null
+                sessionId = $null
             }
         }
         else {
-            $running += [pscustomobject]@{
-                processName = $name
-                pid = [int]$p.Id
-                startTimeUtc = $p.StartTime.ToUniversalTime().ToString('o')
-                isRunning = $true
+            foreach ($process in $processes) {
+                $startTimeUtc = $null
+                try { $startTimeUtc = $process.StartTime.ToUniversalTime().ToString('o') } catch {}
+
+                $running += [pscustomobject]@{
+                    processName = $name
+                    pid = [int]$process.Id
+                    startTimeUtc = $startTimeUtc
+                    isRunning = $true
+                    owner = Get-OfficeProcessOwner -ProcessId $process.Id
+                    sessionId = [int]$process.SessionId
+                }
             }
         }
     }
 
     [pscustomobject]@{
-        installedProducts = @($products | Sort-Object name -Unique)
+        installedProducts = @($products | Sort-Object name, version, installType -Unique)
         runningProcesses = @($running)
     }
+}
+
+function Test-UserProfileSid {
+    param([AllowNull()][string]$Sid)
+
+    return $Sid -match '^(?:S-1-5-21-\d+-\d+-\d+-\d+|S-1-12-1-\d+-\d+-\d+-\d+)$'
 }
 
 function Get-UserProfiles {
@@ -136,35 +248,59 @@ function Get-UserProfiles {
 
     try {
         foreach ($profile in (Get-CimInstance Win32_UserProfile -ErrorAction Stop)) {
-            if ($profile.Special -or $profile.SID -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { continue }
+            if ($profile.Special -or -not (Test-UserProfileSid -Sid $profile.SID)) { continue }
 
             $profilesBySid[$profile.SID] = [pscustomobject]@{
                 sid = [string]$profile.SID
                 localPath = [Environment]::ExpandEnvironmentVariables([string]$profile.LocalPath)
                 loaded = [bool]$profile.Loaded
+                userName = $null
             }
         }
     }
-    catch {}
+    catch {
+        Add-CollectorError -Message "profiles CIM: $($_.Exception.Message)"
+    }
 
     # ProfileList is a useful fallback when CIM is unavailable or incomplete.
     $profileListPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
-    foreach ($key in (Get-ChildItem -LiteralPath $profileListPath -ErrorAction SilentlyContinue)) {
-        $sid = [string]$key.PSChildName
-        if ($sid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { continue }
+    try {
+        $profileKeys = @(Get-ChildItem -LiteralPath $profileListPath -ErrorAction Stop)
+    }
+    catch {
+        Add-CollectorError -Message "profiles registry '$profileListPath': $($_.Exception.Message)"
+        $profileKeys = @()
+    }
 
-        $profileData = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
+    foreach ($key in $profileKeys) {
+        $sid = [string]$key.PSChildName
+        if (-not (Test-UserProfileSid -Sid $sid)) { continue }
+
+        try {
+            $profileData = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
+        }
+        catch {
+            Add-CollectorError -Message "profiles registry [$sid] '$($key.PSPath)': $($_.Exception.Message)"
+            continue
+        }
+
         $localPath = [Environment]::ExpandEnvironmentVariables([string]$profileData.ProfileImagePath)
         if (-not $profilesBySid.ContainsKey($sid)) {
+            $loadedState = Test-UserHiveLoaded -HiveName $sid -ErrorContext "profiles [$sid]"
             $profilesBySid[$sid] = [pscustomobject]@{
                 sid = $sid
                 localPath = $localPath
-                loaded = $false
+                loaded = $loadedState -eq $true
+                userName = $null
             }
         }
         elseif ([string]::IsNullOrWhiteSpace($profilesBySid[$sid].localPath) -and $localPath) {
             $profilesBySid[$sid].localPath = $localPath
         }
+    }
+
+    foreach ($profile in $profilesBySid.Values) {
+        $profile.userName = Resolve-ProfileUserName -Sid $profile.sid -ProfilePath $profile.localPath
     }
 
     return @($profilesBySid.Values | Sort-Object sid)
@@ -173,7 +309,18 @@ function Get-UserProfiles {
 function Add-CollectorError {
     param([Parameter(Mandatory)][string]$Message)
 
-    $script:errors = @($script:errors) + $Message
+    $normalizedMessage = if ($Message.Length -le 1000) { $Message } else { $Message.Substring(0, 1000) }
+    if (@($script:errors).Count -ge 200) {
+        $truncationMessage = 'collector: additional errors were truncated after 200 entries'
+        if (@($script:errors) -notcontains $truncationMessage) {
+            $script:errors = @($script:errors) + $truncationMessage
+        }
+        return
+    }
+
+    if (@($script:errors) -notcontains $normalizedMessage) {
+        $script:errors = @($script:errors) + $normalizedMessage
+    }
 }
 
 function Resolve-ProfileUserName {
@@ -288,8 +435,66 @@ function Get-LegacyOutlookFiles {
     }
 }
 
+function Get-OutlookPstFiles {
+    param(
+        [Parameter(Mandatory)][string]$RootPath,
+        [Parameter(Mandatory)][string]$Sid
+    )
+
+    try {
+        $root = Get-Item -LiteralPath $RootPath -Force -ErrorAction Stop
+        if (-not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return
+        }
+    }
+    catch {
+        if (
+            $_.Exception -isnot [System.Management.Automation.ItemNotFoundException] -and
+            $_.FullyQualifiedErrorId -notmatch 'PathNotFound|ItemNotFound'
+        ) {
+            Add-CollectorError -Message "pstFiles [$Sid] fallback access '$RootPath': $($_.Exception.Message)"
+        }
+        return
+    }
+
+    $pendingDirectories = [System.Collections.Generic.Stack[string]]::new()
+    $pendingDirectories.Push($RootPath)
+
+    while ($pendingDirectories.Count -gt 0) {
+        $currentDirectory = $pendingDirectories.Pop()
+        try {
+            $children = @(Get-ChildItem -LiteralPath $currentDirectory -Force -ErrorAction Stop)
+        }
+        catch {
+            Add-CollectorError -Message "pstFiles [$Sid] fallback access '$currentDirectory': $($_.Exception.Message)"
+            continue
+        }
+
+        foreach ($child in $children) {
+            try {
+                if ($child.PSIsContainer) {
+                    if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                        $pendingDirectories.Push($child.FullName)
+                    }
+                    continue
+                }
+
+                if ($child.Extension -eq '.pst') {
+                    $child
+                }
+            }
+            catch {
+                Add-CollectorError -Message "pstFiles [$Sid] fallback access '$($child.FullName)': $($_.Exception.Message)"
+            }
+        }
+    }
+}
+
 function Test-UserHiveLoaded {
-    param([Parameter(Mandatory)][string]$HiveName)
+    param(
+        [Parameter(Mandatory)][string]$HiveName,
+        [string]$ErrorContext = 'outlook'
+    )
 
     $usersKey = $null
     $hiveKey = $null
@@ -302,7 +507,8 @@ function Test-UserHiveLoaded {
         return $null -ne $hiveKey
     }
     catch {
-        return $false
+        Add-CollectorError -Message "$ErrorContext hive state '$HiveName': $($_.Exception.Message)"
+        return $null
     }
     finally {
         if ($null -ne $hiveKey) { $hiveKey.Dispose() }
@@ -313,40 +519,62 @@ function Test-UserHiveLoaded {
 function Mount-UserHive {
     param(
         [Parameter(Mandatory)][string]$NtUserPath,
-        [Parameter(Mandatory)][string]$HiveName
+        [Parameter(Mandatory)][string]$HiveName,
+        [Parameter(Mandatory)][string]$Sid
     )
 
     try {
-        if (-not (Test-Path -LiteralPath $NtUserPath -PathType Leaf -ErrorAction SilentlyContinue)) {
+        if (-not (Test-Path -LiteralPath $NtUserPath -PathType Leaf -ErrorAction Stop)) {
+            Add-CollectorError -Message "outlook [$Sid] hive mount '$NtUserPath': NTUSER.DAT was not found"
             return $false
         }
 
         $regExe = Join-Path $env:SystemRoot 'System32\reg.exe'
-        & $regExe load "HKU\$HiveName" $NtUserPath *> $null
+        $output = @(& $regExe load "HKU\$HiveName" $NtUserPath 2>&1)
         # A successful reg.exe load means this script owns the temporary hive and must unload it.
-        return $LASTEXITCODE -eq 0
+        if ($LASTEXITCODE -eq 0) { return $true }
+
+        Add-CollectorError -Message "outlook [$Sid] hive mount '$NtUserPath': reg.exe exit $LASTEXITCODE $($output -join ' ')"
+        return $false
     }
     catch {
+        Add-CollectorError -Message "outlook [$Sid] hive mount '$NtUserPath': $($_.Exception.Message)"
         return $false
     }
 }
 
 function Dismount-UserHive {
-    param([Parameter(Mandatory)][string]$HiveName)
+    param(
+        [Parameter(Mandatory)][string]$HiveName,
+        [Parameter(Mandatory)][string]$Sid
+    )
 
     $regExe = Join-Path $env:SystemRoot 'System32\reg.exe'
+    $lastOutput = @()
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        # Release any finalized registry handles before asking Windows to unload the hive.
-        [GC]::Collect()
-        [GC]::WaitForPendingFinalizers()
-        & $regExe unload "HKU\$HiveName" *> $null
-        if ($LASTEXITCODE -eq 0 -or -not (Test-UserHiveLoaded -HiveName $HiveName)) {
-            return
+        try {
+            # Release any finalized registry handles before asking Windows to unload the hive.
+            [GC]::Collect()
+            [GC]::WaitForPendingFinalizers()
+            $lastOutput = @(& $regExe unload "HKU\$HiveName" 2>&1)
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -eq 0) {
+                return $true
+            }
+
+            $loadedState = Test-UserHiveLoaded -HiveName $HiveName -ErrorContext "outlook [$Sid]"
+            if ($loadedState -eq $false) {
+                return $true
+            }
+        }
+        catch {
+            $lastOutput = @($_.Exception.Message)
         }
         Start-Sleep -Milliseconds 150
     }
 
-    Write-Warning "Unable to unload temporary user hive HKU\$HiveName after three attempts."
+    Add-CollectorError -Message "outlook [$Sid] hive unload 'HKU\$HiveName': $($lastOutput -join ' ')"
+    return $false
 }
 
 function Convert-RegistryValueToText {
@@ -392,10 +620,19 @@ function Convert-RegistryValueToText {
 function Get-RegistryTextEntries {
     param(
         [Parameter(Mandatory)][Microsoft.Win32.RegistryKey]$RegistryKey,
-        [Parameter(Mandatory)][string]$KeyPath
+        [Parameter(Mandatory)][string]$KeyPath,
+        [Parameter(Mandatory)][string]$ErrorContext
     )
 
-    foreach ($valueName in $RegistryKey.GetValueNames()) {
+    try {
+        $valueNames = @($RegistryKey.GetValueNames())
+    }
+    catch {
+        Add-CollectorError -Message "$ErrorContext registry values '$KeyPath': $($_.Exception.Message)"
+        $valueNames = @()
+    }
+
+    foreach ($valueName in $valueNames) {
         try {
             $value = $RegistryKey.GetValue(
                 $valueName,
@@ -410,18 +647,33 @@ function Get-RegistryTextEntries {
                 }
             }
         }
-        catch {}
+        catch {
+            Add-CollectorError -Message "$ErrorContext registry value '$KeyPath\$valueName': $($_.Exception.Message)"
+        }
     }
 
-    foreach ($subKeyName in $RegistryKey.GetSubKeyNames()) {
+    try {
+        $subKeyNames = @($RegistryKey.GetSubKeyNames())
+    }
+    catch {
+        Add-CollectorError -Message "$ErrorContext registry subkeys '$KeyPath': $($_.Exception.Message)"
+        $subKeyNames = @()
+    }
+
+    foreach ($subKeyName in $subKeyNames) {
         $subKey = $null
         try {
             $subKey = $RegistryKey.OpenSubKey($subKeyName, $false)
             if ($null -ne $subKey) {
-                Get-RegistryTextEntries -RegistryKey $subKey -KeyPath "$KeyPath\$subKeyName"
+                Get-RegistryTextEntries -RegistryKey $subKey -KeyPath "$KeyPath\$subKeyName" -ErrorContext $ErrorContext
+            }
+            else {
+                Add-CollectorError -Message "$ErrorContext registry open '$KeyPath\$subKeyName': key became unavailable"
             }
         }
-        catch {}
+        catch {
+            Add-CollectorError -Message "$ErrorContext registry open '$KeyPath\$subKeyName': $($_.Exception.Message)"
+        }
         finally {
             if ($null -ne $subKey) { $subKey.Dispose() }
         }
@@ -501,6 +753,63 @@ function Test-AccountRegistryEntry {
     return $Entry.valueName -match '(?i)account\s*name|email\s*address|smtp\s*address|user\s*email'
 }
 
+function Resolve-AccountAddress {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][array]$Accounts,
+        [Parameter(Mandatory)][string]$Sid,
+        [AllowNull()][string]$ProfileName
+    )
+
+    $sidAccounts = @($Accounts | Where-Object {
+        $_.sid -eq $Sid -and -not [string]::IsNullOrWhiteSpace([string]$_.address)
+    })
+
+    if (-not [string]::IsNullOrWhiteSpace($ProfileName)) {
+        $profileAddresses = @($sidAccounts |
+            Where-Object { $_.profileName -eq $ProfileName } |
+            Select-Object -ExpandProperty address -Unique)
+
+        if ($profileAddresses.Count -eq 1) { return [string]$profileAddresses[0] }
+        if ($profileAddresses.Count -gt 1) { return $null }
+    }
+
+    $sidAddresses = @($sidAccounts | Select-Object -ExpandProperty address -Unique)
+    if ($sidAddresses.Count -eq 1) { return [string]$sidAddresses[0] }
+    return $null
+}
+
+function Get-DefaultOutlookProfileNames {
+    param(
+        [Parameter(Mandatory)][Microsoft.Win32.RegistryKey]$UsersKey,
+        [Parameter(Mandatory)][string]$HiveName,
+        [Parameter(Mandatory)][string]$Sid
+    )
+
+    $defaultProfileRoots = @(
+        'Software\Microsoft\Office\16.0\Outlook',
+        'Software\Microsoft\Office\15.0\Outlook',
+        'Software\Microsoft\Windows NT\CurrentVersion\Windows Messaging Subsystem\Profiles'
+    )
+    $names = @()
+    foreach ($relativeRoot in $defaultProfileRoots) {
+        $key = $null
+        try {
+            $key = $UsersKey.OpenSubKey("$HiveName\$relativeRoot", $false)
+            if ($null -eq $key) { continue }
+            $value = $key.GetValue('DefaultProfile', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $names += @(Convert-RegistryValueToText -Value $value)
+        }
+        catch {
+            Add-CollectorError -Message "outlook [$Sid] default profile '$relativeRoot': $($_.Exception.Message)"
+        }
+        finally {
+            if ($null -ne $key) { $key.Dispose() }
+        }
+    }
+
+    return @($names | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+}
+
 function Get-OutlookProfileInfo {
     $profileResults = @{}
     $accountResults = @{}
@@ -516,16 +825,31 @@ function Get-OutlookProfileInfo {
     foreach ($userProfile in (Get-UserProfiles)) {
         $sid = [string]$userProfile.sid
         $profilePath = [string]$userProfile.localPath
+        $userName = [string]$userProfile.userName
+        $profileLoaded = [bool]$userProfile.loaded
+        $windowsProfileKey = "$sid|"
+        $profileResults[$windowsProfileKey] = [pscustomobject]@{
+            sid = $sid
+            profileName = ''
+            profilePath = $profilePath
+            userName = $userName
+            loaded = $profileLoaded
+            isDefault = $false
+        }
         $hiveName = $sid
         $loadedByCollector = $false
-        $canScanRegistry = Test-UserHiveLoaded -HiveName $hiveName
+        $hiveState = Test-UserHiveLoaded -HiveName $hiveName -ErrorContext "outlook [$sid]"
+        $canScanRegistry = $hiveState -eq $true
 
         try {
             if (-not $canScanRegistry -and $profilePath) {
                 $hiveName = "O365Audit_$([Guid]::NewGuid().ToString('N'))"
                 $ntUserPath = Join-Path $profilePath 'NTUSER.DAT'
-                $loadedByCollector = Mount-UserHive -NtUserPath $ntUserPath -HiveName $hiveName
+                $loadedByCollector = Mount-UserHive -NtUserPath $ntUserPath -HiveName $hiveName -Sid $sid
                 $canScanRegistry = $loadedByCollector
+            }
+            elseif (-not $canScanRegistry) {
+                Add-CollectorError -Message "outlook [$sid] hive mount: Windows profile path is unavailable"
             }
 
             if ($canScanRegistry) {
@@ -535,6 +859,7 @@ function Get-OutlookProfileInfo {
                         [Microsoft.Win32.RegistryHive]::Users,
                         [Microsoft.Win32.RegistryView]::Default
                     )
+                    $defaultProfileNames = @(Get-DefaultOutlookProfileNames -UsersKey $usersKey -HiveName $hiveName -Sid $sid)
 
                     foreach ($relativeRoot in $profileRoots) {
                         $rootKey = $null
@@ -550,13 +875,21 @@ function Get-OutlookProfileInfo {
 
                                     $profileDedupKey = "$sid|$($profileName.ToLowerInvariant())"
                                     if (-not $profileResults.ContainsKey($profileDedupKey)) {
+                                        $null = $profileResults.Remove($windowsProfileKey)
                                         $profileResults[$profileDedupKey] = [pscustomobject]@{
                                             sid = $sid
                                             profileName = $profileName
+                                            profilePath = $profilePath
+                                            userName = $userName
+                                            loaded = $profileLoaded
+                                            isDefault = @($defaultProfileNames) -contains $profileName
                                         }
                                     }
+                                    elseif (@($defaultProfileNames) -contains $profileName) {
+                                        $profileResults[$profileDedupKey].isDefault = $true
+                                    }
 
-                                $entries = @(Get-RegistryTextEntries -RegistryKey $profileKey -KeyPath "$relativeRoot\$profileName")
+                                $entries = @(Get-RegistryTextEntries -RegistryKey $profileKey -KeyPath "$relativeRoot\$profileName" -ErrorContext "outlook [$sid][$profileName]")
                                 $contextByKey = @{}
                                 foreach ($contextEntry in $entries) {
                                     if (-not $contextByKey.ContainsKey($contextEntry.keyPath)) {
@@ -575,6 +908,13 @@ function Get-OutlookProfileInfo {
                                                     path = $pstPath
                                                 }
                                         }
+                                        elseif (
+                                            -not [string]::IsNullOrWhiteSpace([string]$pstCandidates[$pstKey].profileName) -and
+                                            $pstCandidates[$pstKey].profileName -ne $profileName
+                                        ) {
+                                            # One physical PST referenced by multiple profiles has no unambiguous account owner.
+                                            $pstCandidates[$pstKey].profileName = $null
+                                        }
                                     }
 
                                     if (-not (Test-AccountRegistryEntry -Entry $entry)) { continue }
@@ -590,7 +930,8 @@ function Get-OutlookProfileInfo {
                                                 sid = $sid
                                                     profileName = $profileName
                                                     accountType = $accountType
-                                                address = $email
+                                                    address = $email
+                                                    isActive = $profileLoaded -and (@($defaultProfileNames) -contains $profileName)
                                             }
                                         }
                                         elseif (
@@ -599,16 +940,23 @@ function Get-OutlookProfileInfo {
                                         ) {
                                             $accountResults[$accountKey].accountType = $accountType
                                         }
+                                        if ($profileLoaded -and (@($defaultProfileNames) -contains $profileName)) {
+                                            $accountResults[$accountKey].isActive = $true
+                                        }
                                     }
                                 }
                                 }
-                                catch {}
+                                catch {
+                                    Add-CollectorError -Message "outlook [$sid][$profileName] registry: $($_.Exception.Message)"
+                                }
                                 finally {
                                     if ($null -ne $profileKey) { $profileKey.Dispose() }
                                 }
                             }
                         }
-                        catch {}
+                        catch {
+                            Add-CollectorError -Message "outlook [$sid] registry root '$relativeRoot': $($_.Exception.Message)"
+                        }
                         finally {
                             if ($null -ne $rootKey) { $rootKey.Dispose() }
                         }
@@ -619,68 +967,101 @@ function Get-OutlookProfileInfo {
                 }
             }
         }
-        catch {}
+        catch {
+            Add-CollectorError -Message "outlook [$sid] registry scan: $($_.Exception.Message)"
+        }
         finally {
             if ($loadedByCollector) {
-                Dismount-UserHive -HiveName $hiveName
+                $null = Dismount-UserHive -HiveName $hiveName -Sid $sid
             }
         }
 
         # Registry data may be absent or stale, so inspect only standard PST locations.
         if ($profilePath) {
-            $fallbackDirectories = @(
-                (Join-Path $profilePath 'Documents\Outlook Files'),
-                (Join-Path $profilePath 'AppData\Local\Microsoft\Outlook'),
-                (Join-Path $profilePath 'Local Settings\Application Data\Microsoft\Outlook')
-            )
+            try {
+                $profileDirectory = Get-Item -LiteralPath $profilePath -Force -ErrorAction Stop
+                $profilePathAccessible = $profileDirectory.PSIsContainer -and
+                    ($profileDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0
+                if (-not $profilePathAccessible) {
+                    Add-CollectorError -Message "profiles [$sid] path '$profilePath': path is not a regular directory"
+                }
+            }
+            catch {
+                $profilePathAccessible = $false
+                Add-CollectorError -Message "profiles [$sid] path '$profilePath': $($_.Exception.Message)"
+            }
 
-            foreach ($directory in ($fallbackDirectories | Select-Object -Unique)) {
-                if (-not (Test-Path -LiteralPath $directory -PathType Container -ErrorAction SilentlyContinue)) {
-                    continue
+            if ($profilePathAccessible) {
+                $fallbackDirectories = @(
+                    (Join-Path $profilePath 'Documents\Outlook Files'),
+                    (Join-Path $profilePath 'AppData\Local\Microsoft\Outlook'),
+                    (Join-Path $profilePath 'Local Settings\Application Data\Microsoft\Outlook')
+                )
+
+                foreach ($directory in ($fallbackDirectories | Select-Object -Unique)) {
+                    foreach ($file in (Get-OutlookPstFiles -RootPath $directory -Sid $sid)) {
+                        $pstKey = "$sid|$($file.FullName.ToLowerInvariant())"
+                        if (-not $pstCandidates.ContainsKey($pstKey)) {
+                            $pstCandidates[$pstKey] = [pscustomobject]@{
+                                sid = $sid
+                                profileName = $null
+                                path = $file.FullName
+                            }
+                        }
+                    }
                 }
 
-                foreach ($file in (Get-ChildItem -LiteralPath $directory -Filter '*.pst' -File -Recurse -Force -ErrorAction SilentlyContinue)) {
-                    $pstKey = "$sid|$($file.FullName.ToLowerInvariant())"
-                    if (-not $pstCandidates.ContainsKey($pstKey)) {
-                        $pstCandidates[$pstKey] = [pscustomobject]@{
-                            sid = $sid
-                            profileName = $null
-                            path = $file.FullName
+                $legacyDirectories = @(
+                    'AppData\Roaming\Microsoft\Outlook',
+                    'AppData\Local\Microsoft\Outlook',
+                    'Application Data\Microsoft\Outlook',
+                    'Documents\Outlook Files'
+                )
+
+                foreach ($relativeDirectory in $legacyDirectories) {
+                    if (-not (Test-LegacyScanRoot -ProfilePath $profilePath -RelativePath $relativeDirectory -Sid $sid)) {
+                        continue
+                    }
+
+                    $legacyRoot = Join-Path $profilePath $relativeDirectory
+                    foreach ($file in (Get-LegacyOutlookFiles -RootPath $legacyRoot -Sid $sid)) {
+                        try {
+                            $fullPath = [IO.Path]::GetFullPath($file.FullName)
+                            $legacyKey = "$sid|$($fullPath.ToLowerInvariant())"
+                            if (-not $legacyCandidates.ContainsKey($legacyKey)) {
+                                $legacyCandidates[$legacyKey] = [pscustomobject]@{
+                                    sid = $sid
+                                    userName = $userName
+                                    profileName = $file.BaseName
+                                    artifactType = $file.Extension.TrimStart('.').ToUpperInvariant()
+                                    path = $fullPath
+                                }
+                            }
+                        }
+                        catch {
+                            Add-CollectorError -Message "legacyFiles [$sid] access '$($file.FullName)': $($_.Exception.Message)"
                         }
                     }
                 }
             }
+        }
+        else {
+            Add-CollectorError -Message "profiles [$sid] path: Windows profile path is unavailable"
+        }
 
-            $legacyDirectories = @(
-                'AppData\Roaming\Microsoft\Outlook',
-                'AppData\Local\Microsoft\Outlook',
-                'Application Data\Microsoft\Outlook',
-                'Documents\Outlook Files'
-            )
-            $userName = Resolve-ProfileUserName -Sid $sid -ProfilePath $profilePath
-
-            foreach ($relativeDirectory in $legacyDirectories) {
-                if (-not (Test-LegacyScanRoot -ProfilePath $profilePath -RelativePath $relativeDirectory -Sid $sid)) {
-                    continue
-                }
-
-                $legacyRoot = Join-Path $profilePath $relativeDirectory
-                foreach ($file in (Get-LegacyOutlookFiles -RootPath $legacyRoot -Sid $sid)) {
-                    try {
-                        $fullPath = [IO.Path]::GetFullPath($file.FullName)
-                        $legacyKey = "$sid|$($fullPath.ToLowerInvariant())"
-                        if (-not $legacyCandidates.ContainsKey($legacyKey)) {
-                            $legacyCandidates[$legacyKey] = [pscustomobject]@{
-                                sid = $sid
-                                userName = $userName
-                                profileName = $file.BaseName
-                                artifactType = $file.Extension.TrimStart('.').ToUpperInvariant()
-                                path = $fullPath
-                            }
-                        }
-                    }
-                    catch {
-                        Add-CollectorError -Message "legacyFiles [$sid] access '$($file.FullName)': $($_.Exception.Message)"
+        $outlookProfilesForSid = @($profileResults.Values | Where-Object {
+            $_.sid -eq $sid -and -not [string]::IsNullOrWhiteSpace([string]$_.profileName)
+        })
+        if (
+            $outlookProfilesForSid.Count -eq 1 -and
+            -not ($outlookProfilesForSid | Where-Object { $_.isDefault })
+        ) {
+            $singleProfileName = [string]$outlookProfilesForSid[0].profileName
+            $outlookProfilesForSid[0].isDefault = $true
+            if ($profileLoaded) {
+                foreach ($account in $accountResults.Values) {
+                    if ($account.sid -eq $sid -and $account.profileName -eq $singleProfileName) {
+                        $account.isActive = $true
                     }
                 }
             }
@@ -689,15 +1070,25 @@ function Get-OutlookProfileInfo {
 
     $accounts = @($accountResults.Values | Sort-Object sid, profileName, address, accountType)
     $pstFiles = foreach ($entry in ($pstCandidates.Values | Sort-Object sid, path)) {
-        $fileInfo = Get-Item -LiteralPath $entry.path -ErrorAction SilentlyContinue
+        $fileInfo = $null
+        try {
+            $fileInfo = Get-Item -LiteralPath $entry.path -Force -ErrorAction Stop
+        }
+        catch {
+            if (
+                $_.Exception -isnot [System.Management.Automation.ItemNotFoundException] -and
+                $_.FullyQualifiedErrorId -notmatch 'PathNotFound|ItemNotFound'
+            ) {
+                Add-CollectorError -Message "pstFiles [$($entry.sid)] access '$($entry.path)': $($_.Exception.Message)"
+            }
+        }
         $exists = $null -ne $fileInfo -and -not $fileInfo.PSIsContainer
-        $upn = $accounts |
-            Where-Object { $_.sid -eq $entry.sid } |
-            Select-Object -First 1 -ExpandProperty address
+        $upn = Resolve-AccountAddress -Accounts $accounts -Sid $entry.sid -ProfileName $entry.profileName
 
         [pscustomobject]@{
             sid = $entry.sid
             userPrincipalName = $upn
+            profileName = $entry.profileName
             path = $entry.path
             sizeBytes = if ($exists) { [int64]$fileInfo.Length } else { [int64]0 }
             existsOnDisk = [bool]$exists
@@ -706,9 +1097,16 @@ function Get-OutlookProfileInfo {
     }
 
     $legacyFiles = foreach ($entry in ($legacyCandidates.Values | Sort-Object sid, path)) {
-        $upn = $accounts |
-            Where-Object { $_.sid -eq $entry.sid } |
-            Select-Object -First 1 -ExpandProperty address
+        $matchingProfileNames = @($profileResults.Values |
+            Where-Object { $_.sid -eq $entry.sid -and $_.profileName -eq $entry.profileName } |
+            Select-Object -ExpandProperty profileName -Unique)
+        $resolvedProfileName = if ($matchingProfileNames.Count -eq 1) {
+            [string]$matchingProfileNames[0]
+        }
+        else {
+            $null
+        }
+        $upn = Resolve-AccountAddress -Accounts $accounts -Sid $entry.sid -ProfileName $resolvedProfileName
         $fileInfo = $null
 
         try {
@@ -725,7 +1123,7 @@ function Get-OutlookProfileInfo {
             sid = $entry.sid
             userName = $entry.userName
             userPrincipalName = $upn
-            profileName = $entry.profileName
+            profileName = $resolvedProfileName
             artifactType = $entry.artifactType
             path = $entry.path
             sizeBytes = if ($null -ne $fileInfo) { [int64]$fileInfo.Length } else { [int64]0 }
@@ -742,10 +1140,12 @@ function Get-OutlookProfileInfo {
     }
 }
 
+if ($FunctionsOnly) { return }
+
 $started = Get-Date
 $errors = @()
 
-try { $device = Get-DeviceInfo } catch { $errors += "device: $($_.Exception.Message)"; $device = [pscustomobject]@{ hostname=$env:COMPUTERNAME; serialNumber=$null; os=$null; lastLoggedOnUser=$null; ips=@(); ou=$null; site=$null } }
+try { $device = Get-DeviceInfo } catch { $errors += "device: $($_.Exception.Message)"; $device = [pscustomobject]@{ hostname=$env:COMPUTERNAME; serialNumber=$null; os=$null; lastLoggedOnUser=$null; currentLoggedOnUser=$null; ips=@(); ou=$null; site=$null } }
 try { $storage = Get-StorageInfo } catch { $errors += "storage: $($_.Exception.Message)"; $storage = [pscustomobject]@{ volumes=@(); disks=@() } }
 try { $office = Get-OfficeInfo } catch { $errors += "office: $($_.Exception.Message)"; $office = [pscustomobject]@{ installedProducts=@(); runningProcesses=@() } }
 try { $mail = Get-OutlookProfileInfo } catch { $errors += "outlook: $($_.Exception.Message)"; $mail = [pscustomobject]@{ profiles=@(); mailAccounts=@(); pstFiles=@(); legacyFiles=@() } }
@@ -753,7 +1153,7 @@ try { $mail = Get-OutlookProfileInfo } catch { $errors += "outlook: $($_.Excepti
 $duration = [int]((Get-Date) - $started).TotalMilliseconds
 
 $payload = [ordered]@{
-    schemaVersion = '1.1'
+    schemaVersion = '1.3'
     device = $device
     storage = $storage
     office = $office

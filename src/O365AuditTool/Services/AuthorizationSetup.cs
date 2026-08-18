@@ -15,6 +15,9 @@ public static class AuthorizationSetup
             options.AddPolicy("AuditAdmin", p => p.Requirements.Add(new RoleMappingRequirement("AuditAdmin")));
             options.AddPolicy("AuditReader", p => p.Requirements.Add(new RoleMappingRequirement("AuditReader")));
             options.AddPolicy("MigrationPlanner", p => p.Requirements.Add(new RoleMappingRequirement("MigrationPlanner")));
+            options.FallbackPolicy = new AuthorizationPolicyBuilder()
+                .RequireAuthenticatedUser()
+                .Build();
         });
 
         return services;
@@ -32,7 +35,7 @@ public class RoleMappingAuthorizationHandler(IOptions<AuthOptions> authOptions) 
         new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
         {
             ["AuditAdmin"] = ["AuditAdmin"],
-            ["AuditReader"] = ["AuditReader", "AuditAdmin"],
+            ["AuditReader"] = ["AuditReader", "MigrationPlanner", "AuditAdmin"],
             ["MigrationPlanner"] = ["MigrationPlanner", "AuditAdmin"]
         };
 

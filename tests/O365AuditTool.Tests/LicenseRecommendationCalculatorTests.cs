@@ -19,7 +19,9 @@ public class LicenseRecommendationCalculatorTests
         var result = Assert.Single(LicenseRecommendationCalculator.Calculate(inputs));
 
         Assert.Equal(30 * GiB, result.TotalPstBytes);
-        Assert.Equal("Exchange Online Plan 1", result.RecommendedLicense);
+        Assert.Equal("Plan 1 capacity candidate", result.RecommendedLicense);
+        Assert.True(result.RequiresTenantValidation);
+        Assert.Equal("Medium", result.Confidence);
     }
 
     [Fact]
@@ -34,7 +36,7 @@ public class LicenseRecommendationCalculatorTests
         var result = Assert.Single(LicenseRecommendationCalculator.Calculate(inputs));
 
         Assert.Equal(60 * GiB, result.TotalPstBytes);
-        Assert.Equal("Exchange Online Plan 2", result.RecommendedLicense);
+        Assert.Equal("Plan 2 capacity candidate", result.RecommendedLicense);
     }
 
     [Fact]
@@ -52,10 +54,10 @@ public class LicenseRecommendationCalculatorTests
     }
 
     [Theory]
-    [InlineData(50, "Exchange Online Plan 1")]
-    [InlineData(51, "Exchange Online Plan 2")]
-    [InlineData(100, "Exchange Online Plan 2")]
-    [InlineData(101, "Exchange Online Plan 2 + Online Archive")]
+    [InlineData(50, "Plan 1 capacity candidate")]
+    [InlineData(51, "Plan 2 capacity candidate")]
+    [InlineData(100, "Plan 2 capacity candidate")]
+    [InlineData(101, "Archive/import strategy required")]
     public void Calculate_AppliesLicenseThresholds(long sizeGb, string expected)
     {
         var result = Assert.Single(LicenseRecommendationCalculator.Calculate(

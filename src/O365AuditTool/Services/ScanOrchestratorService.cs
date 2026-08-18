@@ -107,17 +107,53 @@ public class ScanOrchestratorService(
             return;
         }
 
-        var job = new ScanJob
-        {
-            RequestedBy = "scheduler",
-            OuFilter = _options.DefaultOuFilter,
-            SiteFilter = null,
-            Status = JobStatus.Queued
-        };
+        var job = BuildDailyScheduledJob(_options, DateTime.UtcNow);
 
         db.ScanJobs.Add(job);
         await db.SaveChangesAsync(cancellationToken);
-        logger.LogInformation("Scheduled daily scan job {JobId}", job.Id);
+        if (job.Status == JobStatus.Failed)
+        {
+            logger.LogError("Daily scan job {JobId} failed closed because no explicit AD scope is configured", job.Id);
+        }
+        else
+        {
+            logger.LogInformation(
+                "Scheduled daily scan job {JobId} for OU scope {OuFilter} and site scope {SiteFilter}",
+                job.Id,
+                job.OuFilter,
+                job.SiteFilter);
+        }
+    }
+
+    internal static ScanJob BuildDailyScheduledJob(CollectorOptions options, DateTime utcNow)
+    {
+        var ouFilter = string.IsNullOrWhiteSpace(options.DefaultOuFilter)
+            ? null
+            : options.DefaultOuFilter.Trim();
+        var siteFilter = string.IsNullOrWhiteSpace(options.DefaultSiteFilter)
+            ? null
+            : options.DefaultSiteFilter.Trim();
+
+        if (ouFilter is null && siteFilter is null)
+        {
+            return new ScanJob
+            {
+                RequestedBy = "scheduler",
+                Status = JobStatus.Failed,
+                CreatedUtc = utcNow,
+                CompletedUtc = utcNow,
+                Notes = "Scheduled scan was not queued because both Collector:DefaultOuFilter and Collector:DefaultSiteFilter are empty. Configure an explicit AD scope."
+            };
+        }
+
+        return new ScanJob
+        {
+            RequestedBy = "scheduler",
+            OuFilter = ouFilter,
+            SiteFilter = siteFilter,
+            Status = JobStatus.Queued,
+            CreatedUtc = utcNow
+        };
     }
 
     private async Task<ScanJob?> TryClaimNextQueuedJobAsync(CancellationToken cancellationToken)
@@ -215,6 +251,10 @@ public class ScanOrchestratorService(
                         if (result.Success && result.Payload is not null)
                         {
                             await ingestor.SavePayloadAsync(jobId, target, result.Payload, deviceCancellationToken);
+                            if (result.Payload.Errors.Count > 0)
+                            {
+                                Interlocked.Increment(ref errorCount);
+                            }
                         }
                         else
                         {
@@ -223,12 +263,12 @@ public class ScanOrchestratorService(
                                 jobId,
                                 target,
                                 result.ErrorMessage ?? "Unknown error",
-                                result.IsOffline,
+                                GetFailureStatus(result),
                                 deviceCancellationToken);
 
                             if (item.Status == DeviceScanStatus.Offline)
                             {
-                                await EnqueueRetryAsync(deviceDb, target.Name, jobId, 1, deviceCancellationToken);
+                                await EnqueueRetryAsync(deviceDb, target, jobId, 1, deviceCancellationToken);
                             }
                         }
                     }
@@ -249,6 +289,13 @@ public class ScanOrchestratorService(
                         "Unexpected scan failure for {Device} in job {JobId}",
                         target.Name,
                         jobId);
+
+                    await PersistUnexpectedDeviceFailureAsync(
+                        jobId,
+                        target,
+                        ex,
+                        persistenceGate,
+                        deviceCancellationToken);
                 }
             });
 
@@ -302,7 +349,7 @@ public class ScanOrchestratorService(
                         return;
                     }
 
-                    var target = new DeviceTarget(retry.DeviceName);
+                    var target = new DeviceTarget(retry.DeviceName, retry.Ou, retry.Site);
                     var result = await runner.RunAsync(retry.DeviceName, deviceCancellationToken);
                     await persistenceGate.WaitAsync(deviceCancellationToken);
                     try
@@ -314,6 +361,25 @@ public class ScanOrchestratorService(
                         }
                         else
                         {
+                            var failureStatus = GetFailureStatus(result);
+                            await ingestor.SaveFailureAsync(
+                                retry.ScanJobId,
+                                target,
+                                result.ErrorMessage ?? "Unknown retry error",
+                                failureStatus,
+                                deviceCancellationToken);
+
+                            if (failureStatus != DeviceScanStatus.Offline)
+                            {
+                                logger.LogWarning(
+                                    "Retry stopped for {Device} after non-offline failure {FailureStatus}",
+                                    retry.DeviceName,
+                                    failureStatus);
+                                db.RetryQueue.Remove(retry);
+                                await db.SaveChangesAsync(deviceCancellationToken);
+                                return;
+                            }
+
                             var maxAttempts = _options.RetryMinutes.Length;
                             retry.Attempt++;
                             if (retry.Attempt > maxAttempts)
@@ -403,7 +469,7 @@ public class ScanOrchestratorService(
 
     private async Task EnqueueRetryAsync(
         AuditDbContext db,
-        string deviceName,
+        DeviceTarget target,
         Guid jobId,
         int attempt,
         CancellationToken cancellationToken)
@@ -411,13 +477,68 @@ public class ScanOrchestratorService(
         var minutes = _options.RetryMinutes.Length == 0 ? 30 : _options.RetryMinutes[0];
         db.RetryQueue.Add(new RetryQueueItem
         {
-            DeviceName = deviceName,
+            DeviceName = target.Name,
+            Ou = target.Ou,
+            Site = target.Site,
             ScanJobId = jobId,
             Attempt = attempt,
             NextAttemptUtc = DateTime.UtcNow.AddMinutes(minutes)
         });
         await db.SaveChangesAsync(cancellationToken);
     }
+
+    private async Task PersistUnexpectedDeviceFailureAsync(
+        Guid jobId,
+        DeviceTarget target,
+        Exception exception,
+        SemaphoreSlim persistenceGate,
+        CancellationToken cancellationToken)
+    {
+        var message = $"Unexpected collector failure: {exception.Message}";
+        if (message.Length > 4096)
+        {
+            message = message[..4096];
+        }
+
+        try
+        {
+            await persistenceGate.WaitAsync(cancellationToken);
+            try
+            {
+                using var failureScope = serviceProvider.CreateScope();
+                var failureIngestor = failureScope.ServiceProvider.GetRequiredService<IInventoryIngestionService>();
+                await failureIngestor.SaveFailureAsync(
+                    jobId,
+                    target,
+                    message,
+                    DeviceScanStatus.Error,
+                    cancellationToken);
+            }
+            finally
+            {
+                persistenceGate.Release();
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception persistenceException)
+        {
+            logger.LogCritical(
+                persistenceException,
+                "Failed to persist unexpected scan failure for {Device} in job {JobId}",
+                target.Name,
+                jobId);
+        }
+    }
+
+    internal static DeviceScanStatus GetFailureStatus(CollectResult result) =>
+        result.IsTimedOut
+            ? DeviceScanStatus.Timeout
+            : result.IsOffline
+                ? DeviceScanStatus.Offline
+                : DeviceScanStatus.Error;
 
     private async Task DelayAfterFailureAsync(CancellationToken cancellationToken)
     {

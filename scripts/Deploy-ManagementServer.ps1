@@ -7,11 +7,18 @@ param(
     [string]$ServiceName = "O365AuditTool",
     [ValidateRange(1, 65535)]
     [int]$Port = 5080,
+    [ValidateRange(1, 65535)]
+    [int]$HealthPort = 5081,
+    [string]$DashboardDnsName = "",
+    [string]$TlsCertificateThumbprint = "",
+    [switch]$AllowInsecureHttpDashboard,
     [string]$PsExecPath = "C:\Tools\PsExec\psexec.exe",
-    [string]$CollectorSharePath = "C:\temp\o365audit\share",
+    [string]$CollectorSharePath = "",
     [string]$CollectorShareName = "o365audit",
     [string]$DomainComputersGroup = "",
     [string[]]$FallbackTargets = @(),
+    [string]$DefaultOuFilter = "",
+    [string]$DefaultSiteFilter = "",
     [string[]]$AuditAdminGroups = @(),
     [string[]]$AuditReaderGroups = @(),
     [string[]]$MigrationPlannerGroups = @(),
@@ -22,11 +29,17 @@ param(
     [switch]$EnableArtifactCopy,
     [string]$CopyTargetRoot = "",
     [string[]]$AllowedCopyTargetRoots = @(),
+    [string[]]$AllowedCopySourceUncRoots = @(),
     [switch]$CopyVerifySha256,
-    [switch]$SkipPublish
+    [switch]$DisableCopySha256,
+    [switch]$SkipPublish,
+    [switch]$FunctionsOnly
 )
 
 $ErrorActionPreference = 'Stop'
+if ($CopyVerifySha256 -and $DisableCopySha256) {
+    throw 'CopyVerifySha256 ve DisableCopySha256 birlikte kullanilamaz.'
+}
 
 function Assert-Admin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -42,27 +55,295 @@ function Ensure-Directory([string]$Path) {
     }
 }
 
-function Resolve-DotNetPath {
-    $command = Get-Command dotnet -ErrorAction SilentlyContinue
-    if ($command -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) {
-        return $command.Source
+function Assert-NoReparsePointInPath {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $root = [IO.Path]::GetPathRoot($fullPath)
+    $current = $root
+    foreach ($segment in $fullPath.Substring($root.Length).Split([char[]]'\/', [StringSplitOptions]::RemoveEmptyEntries)) {
+        $current = Join-Path $current $segment
+        if (-not (Test-Path -LiteralPath $current)) {
+            continue
+        }
+
+        $item = Get-Item -LiteralPath $current -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Yonetilen deployment path'i reparse point iceremez: '$current'."
+        }
     }
+}
 
-    $candidates = @(
-        (Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'),
-        'C:\Program Files\dotnet\dotnet.exe'
-    ) | Select-Object -Unique
+function Assert-NoReparsePointTree {
+    param([Parameter(Mandatory)][string]$Root)
 
-    foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            return $candidate
+    Assert-NoReparsePointInPath -Path $Root
+    $reparseItem = Get-ChildItem -LiteralPath $Root -Force -Recurse -ErrorAction Stop |
+        Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 } |
+        Select-Object -First 1
+    if ($null -ne $reparseItem) {
+        throw "Deployment kaynak agaci reparse point iceremez: '$($reparseItem.FullName)'."
+    }
+}
+
+function Assert-DirectoryCopyIntegrity {
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$DestinationRoot
+    )
+
+    $normalizedSource = [IO.Path]::GetFullPath($SourceRoot).TrimEnd('\') + '\'
+    foreach ($sourceFile in (Get-ChildItem -LiteralPath $SourceRoot -File -Force -Recurse)) {
+        $relativePath = $sourceFile.FullName.Substring($normalizedSource.Length)
+        $destinationFile = Join-Path $DestinationRoot $relativePath
+        if (-not (Test-Path -LiteralPath $destinationFile -PathType Leaf)) {
+            throw "Deployment copy dogrulamasi hedef dosyayi bulamadi: '$destinationFile'."
+        }
+
+        $sourceHash = (Get-FileHash -LiteralPath $sourceFile.FullName -Algorithm SHA256).Hash
+        $destinationHash = (Get-FileHash -LiteralPath $destinationFile -Algorithm SHA256).Hash
+        if (-not $sourceHash.Equals($destinationHash, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Deployment copy SHA256 dogrulamasi basarisiz: '$relativePath'."
+        }
+    }
+}
+
+function Resolve-DashboardDnsName {
+    param([string]$ExplicitName)
+
+    $name = $ExplicitName.Trim().TrimEnd('.')
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        try {
+            $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+            if ($computerSystem.PartOfDomain -and -not [string]::IsNullOrWhiteSpace([string]$computerSystem.Domain)) {
+                $name = "$env:COMPUTERNAME.$($computerSystem.Domain)"
+            }
+        }
+        catch {}
+
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            $name = $env:COMPUTERNAME
         }
     }
 
-    throw "dotnet bulunamadi. Bu uygulama icin .NET 8 SDK veya ASP.NET Core Runtime 8 gerekir."
+    if ($name.Length -gt 253 -or $name -notmatch '^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$') {
+        throw "DashboardDnsName gecerli bir DNS hostname veya FQDN degil: '$name'."
+    }
+
+    return $name.ToLowerInvariant()
 }
 
-function Assert-DotNet8 {
+function Test-CertificateDnsName {
+    param(
+        [Parameter(Mandatory)][string]$CertificateName,
+        [Parameter(Mandatory)][string]$RequestedName
+    )
+
+    $certificateName = $CertificateName.Trim().TrimEnd('.').ToLowerInvariant()
+    $requestedName = $RequestedName.Trim().TrimEnd('.').ToLowerInvariant()
+    if ($certificateName.Equals($requestedName, [StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    if (-not $certificateName.StartsWith('*.')) {
+        return $false
+    }
+
+    $suffix = $certificateName.Substring(1)
+    if (-not $requestedName.EndsWith($suffix, [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $prefix = $requestedName.Substring(0, $requestedName.Length - $suffix.Length)
+    return $prefix.Length -gt 0 -and -not $prefix.Contains('.')
+}
+
+function Remove-DeploymentDirectory {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Root
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return
+    }
+
+    $resolvedRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+    $resolvedPath = [IO.Path]::GetFullPath($Path)
+    $leaf = Split-Path $resolvedPath -Leaf
+    if (
+        -not $resolvedPath.StartsWith($resolvedRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $leaf -notmatch '^\.(?:staging|rollback|failed)-[0-9a-f]{32}$'
+    ) {
+        throw "Guvenli olmayan deployment cleanup path'i reddedildi: '$resolvedPath'."
+    }
+
+    Remove-Item -LiteralPath $resolvedPath -Recurse -Force
+}
+
+function Resolve-TlsCertificateThumbprint {
+    param(
+        [string]$Thumbprint,
+        [bool]$AllowInsecure,
+        [string]$DnsName
+    )
+
+    if ($AllowInsecure) {
+        Write-Warning 'Dashboard HTTP istisnasi etkin. Bu mod yalnizca izole test aginda kullanilmalidir.'
+        return ''
+    }
+    if ([string]::IsNullOrWhiteSpace($Thumbprint)) {
+        throw 'Production dashboard icin -TlsCertificateThumbprint zorunludur. Yalnizca izole test icin -AllowInsecureHttpDashboard kullanilabilir.'
+    }
+
+    $normalized = ($Thumbprint -replace '\s', '').ToUpperInvariant()
+    if ($normalized -notmatch '^[0-9A-F]{40,128}$') {
+        throw 'TlsCertificateThumbprint gecerli hexadecimal sertifika thumbprint degerinde degil.'
+    }
+
+    $certificate = Get-Item -LiteralPath "Cert:\LocalMachine\My\$normalized" -ErrorAction SilentlyContinue
+    if ($null -eq $certificate -or -not $certificate.HasPrivateKey) {
+        throw "LocalMachine\\My deposunda private key iceren TLS sertifikasi bulunamadi: '$normalized'."
+    }
+    if ($certificate.NotAfter.ToUniversalTime() -le [DateTime]::UtcNow) {
+        throw "TLS sertifikasinin suresi dolmus: '$normalized'."
+    }
+    if ($certificate.NotBefore.ToUniversalTime() -gt [DateTime]::UtcNow) {
+        throw "TLS sertifikasi henuz gecerli degil: '$normalized'."
+    }
+
+    $ekuExtension = $certificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | Select-Object -First 1
+    if ($null -eq $ekuExtension -or -not ($ekuExtension.EnhancedKeyUsages | Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.1' })) {
+        throw "TLS sertifikasi Server Authentication EKU icermiyor: '$normalized'."
+    }
+
+    $certificateDnsNames = @()
+    if ($null -ne $certificate.DnsNameList) {
+        $certificateDnsNames = @($certificate.DnsNameList | ForEach-Object { [string]$_.Unicode })
+    }
+    if ($certificateDnsNames.Count -eq 0) {
+        $fallbackDnsName = $certificate.GetNameInfo(
+            [Security.Cryptography.X509Certificates.X509NameType]::DnsName,
+            $false)
+        if (-not [string]::IsNullOrWhiteSpace($fallbackDnsName)) {
+            $certificateDnsNames = @($fallbackDnsName)
+        }
+    }
+    if (-not ($certificateDnsNames | Where-Object { Test-CertificateDnsName -CertificateName $_ -RequestedName $DnsName })) {
+        throw "TLS sertifikasi DashboardDnsName '$DnsName' icin uygun SAN/DNS adi icermiyor. Sertifika adlari: $($certificateDnsNames -join ', ')."
+    }
+
+    return $normalized
+}
+
+function Ensure-HttpSpns {
+    param(
+        [Parameter(Mandatory)][string]$AccountName,
+        [Parameter(Mandatory)][string]$DnsName
+    )
+
+    $setSpnPath = Join-Path $env:SystemRoot 'System32\setspn.exe'
+    if (-not (Test-Path -LiteralPath $setSpnPath -PathType Leaf)) {
+        throw "setspn.exe bulunamadi; Kerberos HTTP SPN dogrulanamiyor."
+    }
+
+    $names = @($DnsName, $DnsName.Split('.')[0]) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique
+    foreach ($name in $names) {
+        $spn = "HTTP/$name"
+        $existingForAccount = @(& $setSpnPath -L $AccountName 2>&1)
+        if ($LASTEXITCODE -eq 0 -and ($existingForAccount | Where-Object { $_.Trim().Equals($spn, [StringComparison]::OrdinalIgnoreCase) })) {
+            continue
+        }
+
+        $result = @(& $setSpnPath -S $spn $AccountName 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Kerberos SPN kaydedilemedi: setspn -S $spn $AccountName. Cikti: $($result -join ' '). Duplicate SPN veya AD yetkisini kontrol edin."
+        }
+    }
+}
+
+function Grant-TlsPrivateKeyRead {
+    param(
+        [Parameter(Mandatory)][string]$Thumbprint,
+        [Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$AccountSid
+    )
+
+    $certificate = Get-Item -LiteralPath "Cert:\LocalMachine\My\$Thumbprint" -ErrorAction Stop
+    $key = $null
+    $keyPath = $null
+    try {
+        $key = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
+        if ($null -eq $key) {
+            $key = [Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($certificate)
+        }
+
+        if ($key -is [Security.Cryptography.RSACng] -or $key -is [Security.Cryptography.ECDsaCng]) {
+            $keyPath = Join-Path $env:ProgramData "Microsoft\Crypto\Keys\$($key.Key.UniqueName)"
+        }
+        elseif ($key -is [Security.Cryptography.RSACryptoServiceProvider]) {
+            $containerName = $key.CspKeyContainerInfo.UniqueKeyContainerName
+            $keyPath = Join-Path $env:ProgramData "Microsoft\Crypto\RSA\MachineKeys\$containerName"
+        }
+
+        if ([string]::IsNullOrWhiteSpace($keyPath) -or -not (Test-Path -LiteralPath $keyPath -PathType Leaf)) {
+            throw "TLS private key dosyasi cozumlenemedi. Sertifikanin machine-key olarak import edildigini dogrulayin: '$Thumbprint'."
+        }
+
+        $keyAcl = Get-Acl -LiteralPath $keyPath
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+            $AccountSid,
+            [Security.AccessControl.FileSystemRights]::Read,
+            [Security.AccessControl.AccessControlType]::Allow)
+        $keyAcl.SetAccessRule($rule)
+        Set-Acl -LiteralPath $keyPath -AclObject $keyAcl
+    }
+    finally {
+        if ($key -is [IDisposable]) {
+            $key.Dispose()
+        }
+    }
+}
+
+function Resolve-DotNetPath {
+    param([bool]$Publishing)
+
+    $candidates = @()
+    $command = Get-Command dotnet -ErrorAction SilentlyContinue
+    if ($command -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) {
+        $candidates += $command.Source
+    }
+
+    $candidates += @(
+        $(if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) { Join-Path $env:USERPROFILE '.dotnet\dotnet.exe' }),
+        (Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'),
+        'C:\Program Files\dotnet\dotnet.exe'
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+    foreach ($candidate in ($candidates | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            continue
+        }
+
+        if ($Publishing) {
+            $sdks = @(& $candidate --list-sdks 2>$null)
+            if ($LASTEXITCODE -eq 0 -and ($sdks -match '^10\.\d+\.\d+')) {
+                return $candidate
+            }
+        }
+        else {
+            $runtimes = @(& $candidate --list-runtimes 2>$null)
+            if ($LASTEXITCODE -eq 0 -and ($runtimes -match '^Microsoft\.ASPNetCore\.App 10\.')) {
+                return $candidate
+            }
+        }
+    }
+
+    $requirement = if ($Publishing) { '.NET 10 SDK' } else { 'ASP.NET Core Runtime 10' }
+    throw "$requirement bulunamadi. PATH, %USERPROFILE%\.dotnet ve Program Files konumlari kontrol edildi."
+}
+
+function Assert-DotNet10 {
     param(
         [string]$DotNetPath,
         [bool]$Publishing
@@ -75,14 +356,14 @@ function Assert-DotNet8 {
 
     if ($Publishing) {
         $sdks = @(& $DotNetPath --list-sdks 2>$null)
-        if (-not ($sdks -match '^8\.\d+\.\d+')) {
-            throw ".NET 8 SDK bulunamadi. Kaynak koddan publish icin Microsoft.DotNet.SDK.8 kurulmalidir."
+        if (-not ($sdks -match '^10\.\d+\.\d+')) {
+            throw ".NET 10 SDK bulunamadi. Kaynak koddan publish icin Microsoft.DotNet.SDK.10 kurulmalidir."
         }
     }
 
     $runtimes = @(& $DotNetPath --list-runtimes 2>$null)
-    if (-not ($runtimes -match '^Microsoft\.ASPNetCore\.App 8\.')) {
-        throw "ASP.NET Core Runtime 8 bulunamadi. Framework-dependent servisi calistirmak icin gereklidir."
+    if (-not ($runtimes -match '^Microsoft\.ASPNetCore\.App 10\.')) {
+        throw "ASP.NET Core Runtime 10 bulunamadi. Framework-dependent servisi calistirmak icin gereklidir."
     }
 }
 
@@ -310,6 +591,7 @@ function Resolve-ServiceIdentity {
         return @{
             Type = 'gMSA'
             ScAccount = $GmsaAccount
+            SpnAccount = $GmsaAccount
             AclSid = $sid
             ShareAccount = $sid.Translate([Security.Principal.NTAccount]).Value
         }
@@ -325,6 +607,7 @@ function Resolve-ServiceIdentity {
         return @{
             Type = 'Credential'
             ScAccount = $userName
+            SpnAccount = $userName
             AclSid = $sid
             ShareAccount = $sid.Translate([Security.Principal.NTAccount]).Value
         }
@@ -335,14 +618,14 @@ function Resolve-ServiceIdentity {
     return @{
         Type = 'LocalSystem'
         ScAccount = 'LocalSystem'
+        SpnAccount = "$env:USERDOMAIN\$env:COMPUTERNAME`$"
         AclSid = $localSystemSid
         ShareAccount = $null
     }
 }
 
-function Set-ManagedDirectoryAcl {
+function New-ManagedDirectoryAcl {
     param(
-        [string]$Path,
         [Security.Principal.SecurityIdentifier]$AdministratorsSid,
         [Security.Principal.SecurityIdentifier]$SystemSid,
         [Security.Principal.SecurityIdentifier]$ServiceSid,
@@ -356,14 +639,108 @@ function Set-ManagedDirectoryAcl {
     $none = [Security.AccessControl.PropagationFlags]::None
     $allow = [Security.AccessControl.AccessControlType]::Allow
 
-    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($SystemSid, 'FullControl', $inheritance, $none, $allow)))
-    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($AdministratorsSid, 'FullControl', $inheritance, $none, $allow)))
-    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($ServiceSid, $ServiceRights, $inheritance, $none, $allow)))
+    $null = $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($SystemSid, 'FullControl', $inheritance, $none, $allow)))
+    $null = $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($AdministratorsSid, 'FullControl', $inheritance, $none, $allow)))
+    $null = $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($ServiceSid, $ServiceRights, $inheritance, $none, $allow)))
     if ($null -ne $AdditionalReadSid -and $AdditionalReadSid.Value -ne $ServiceSid.Value) {
-        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($AdditionalReadSid, 'ReadAndExecute', $inheritance, $none, $allow)))
+        $null = $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($AdditionalReadSid, 'ReadAndExecute', $inheritance, $none, $allow)))
     }
 
-    Set-Acl -LiteralPath $Path -AclObject $acl
+    return $acl
+}
+
+function Set-ManagedDirectoryAcl {
+    param(
+        [string]$Path,
+        [Security.Principal.SecurityIdentifier]$AdministratorsSid,
+        [Security.Principal.SecurityIdentifier]$SystemSid,
+        [Security.Principal.SecurityIdentifier]$ServiceSid,
+        [string]$ServiceRights,
+        [Security.Principal.SecurityIdentifier]$AdditionalReadSid
+    )
+
+    $acl = New-ManagedDirectoryAcl `
+        -AdministratorsSid $AdministratorsSid `
+        -SystemSid $SystemSid `
+        -ServiceSid $ServiceSid `
+        -ServiceRights $ServiceRights `
+        -AdditionalReadSid $AdditionalReadSid
+    Set-DirectoryAcl -Path $Path -Acl $acl
+}
+
+function New-DirectoryWithAcl {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][Security.AccessControl.DirectorySecurity]$Acl
+    )
+
+    $directoryInfo = New-Object IO.DirectoryInfo($Path)
+    $aclOverload = [IO.DirectoryInfo].GetMethods() |
+        Where-Object {
+            $_.Name -eq 'Create' -and
+            $_.GetParameters().Count -eq 1 -and
+            $_.GetParameters()[0].ParameterType -eq [Security.AccessControl.DirectorySecurity]
+        } |
+        Select-Object -First 1
+    if ($null -ne $aclOverload) {
+        $directoryInfo.Create($Acl)
+        return
+    }
+
+    [IO.FileSystemAclExtensions]::CreateDirectory($Acl, $Path) | Out-Null
+}
+
+function Set-DirectoryAcl {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][Security.AccessControl.DirectorySecurity]$Acl
+    )
+
+    $directoryInfo = New-Object IO.DirectoryInfo($Path)
+    $setAclMethod = [IO.DirectoryInfo].GetMethods() |
+        Where-Object {
+            $_.Name -eq 'SetAccessControl' -and
+            $_.GetParameters().Count -eq 1 -and
+            $_.GetParameters()[0].ParameterType -eq [Security.AccessControl.DirectorySecurity]
+        } |
+        Select-Object -First 1
+    if ($null -ne $setAclMethod) {
+        $directoryInfo.SetAccessControl($Acl)
+        return
+    }
+
+    [IO.FileSystemAclExtensions]::SetAccessControl($directoryInfo, $Acl)
+}
+
+function Initialize-ManagedDirectory {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$AdministratorsSid,
+        [Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$SystemSid,
+        [Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ServiceSid,
+        [Parameter(Mandatory)][string]$ServiceRights,
+        [Security.Principal.SecurityIdentifier]$AdditionalReadSid
+    )
+
+    $parent = Split-Path $Path -Parent
+    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+        Assert-NoReparsePointInPath -Path $parent
+    }
+    $acl = New-ManagedDirectoryAcl `
+        -AdministratorsSid $AdministratorsSid `
+        -SystemSid $SystemSid `
+        -ServiceSid $ServiceSid `
+        -ServiceRights $ServiceRights `
+        -AdditionalReadSid $AdditionalReadSid
+    if (Test-Path -LiteralPath $Path) {
+        Assert-NoReparsePointInPath -Path $Path
+        Set-DirectoryAcl -Path $Path -Acl $acl
+    }
+    else {
+        New-DirectoryWithAcl -Path $Path -Acl $acl
+    }
+    Assert-NoReparsePointInPath -Path $Path
+    Set-DirectoryAcl -Path $Path -Acl $acl
 }
 
 function Ensure-CollectorShare {
@@ -476,6 +853,8 @@ function Configure-Service {
     Invoke-ServiceControl -Arguments @('description', $Name, 'O365 PST migration inventory and audit service')
 }
 
+if ($FunctionsOnly) { return }
+
 Assert-Admin
 
 $repoRoot = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
@@ -500,19 +879,22 @@ if ($usingPublishedBundle) {
     ) {
         throw "PublishedAppPath uygulama binary'si icermiyor: '$PublishedAppPath'."
     }
+    Assert-NoReparsePointInPath -Path $PublishedAppPath
 }
 else {
-    if ([string]::IsNullOrWhiteSpace($ProjectPath)) {
-        if ([string]::IsNullOrWhiteSpace($repoRoot)) {
-            throw "ProjectPath zorunludur. IEX/bootstrap kurulumunda PublishedAppPath kullanin."
+    if (-not $SkipPublish) {
+        if ([string]::IsNullOrWhiteSpace($ProjectPath)) {
+            if ([string]::IsNullOrWhiteSpace($repoRoot)) {
+                throw "ProjectPath zorunludur. Bootstrap kurulumunda PublishedAppPath kullanin."
+            }
+            $ProjectPath = Join-Path $repoRoot 'src\O365AuditTool'
         }
-        $ProjectPath = Join-Path $repoRoot 'src\O365AuditTool'
-    }
 
-    $ProjectPath = [IO.Path]::GetFullPath($ProjectPath)
-    $csprojPath = Join-Path $ProjectPath 'O365AuditTool.csproj'
-    if (-not (Test-Path -LiteralPath $csprojPath -PathType Leaf)) {
-        throw "ProjectPath gecersiz: '$ProjectPath'. O365AuditTool.csproj bulunamadi."
+        $ProjectPath = [IO.Path]::GetFullPath($ProjectPath)
+        $csprojPath = Join-Path $ProjectPath 'O365AuditTool.csproj'
+        if (-not (Test-Path -LiteralPath $csprojPath -PathType Leaf)) {
+            throw "ProjectPath gecersiz: '$ProjectPath'. O365AuditTool.csproj bulunamadi."
+        }
     }
 }
 
@@ -521,12 +903,22 @@ if (-not [string]::IsNullOrWhiteSpace($CollectorPath)) {
     if (-not (Test-Path -LiteralPath $CollectorPath -PathType Leaf)) {
         throw "CollectorPath gecersiz veya erisilemiyor: '$CollectorPath'."
     }
+    Assert-NoReparsePointInPath -Path $CollectorPath
 }
 
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
+if ([string]::IsNullOrWhiteSpace($CollectorSharePath)) {
+    $CollectorSharePath = Join-Path $InstallRoot 'share'
+}
 $CollectorSharePath = [IO.Path]::GetFullPath($CollectorSharePath)
+if ($Port -eq $HealthPort) {
+    throw 'Port ve HealthPort farkli olmalidir.'
+}
 if ([IO.Path]::GetPathRoot($InstallRoot).TrimEnd('\') -eq $InstallRoot.TrimEnd('\')) {
     throw "InstallRoot bir surucu kok dizini olamaz: '$InstallRoot'."
+}
+if (-not (Test-PathWithinRoot -Path $CollectorSharePath.TrimEnd('\') -Root $InstallRoot.TrimEnd('\'))) {
+    throw "CollectorSharePath InstallRoot altinda olmalidir; yonetilmeyen dizinlerin ACL'leri degistirilmez: '$CollectorSharePath'."
 }
 if ($CollectorShareName -notmatch '^[A-Za-z0-9_-]+$') {
     throw "CollectorShareName yalnizca harf, rakam, alt cizgi ve tire icerebilir."
@@ -536,13 +928,24 @@ if ($ServiceName -notmatch '^[A-Za-z0-9_.-]+$') {
 }
 
 $dotnet = $null
-if (-not $usingPublishedBundle) {
-    $dotnet = Resolve-DotNetPath
-    Assert-DotNet8 -DotNetPath $dotnet -Publishing (-not $SkipPublish.IsPresent)
+if (-not $usingPublishedBundle -and -not $SkipPublish) {
+    $dotnet = Resolve-DotNetPath -Publishing $true
+    Assert-DotNet10 -DotNetPath $dotnet -Publishing $true
 }
 Assert-PsExec -Path $PsExecPath -AllowUnsigned $AllowUnsignedPsExec.IsPresent
 
 $serviceIdentity = Resolve-ServiceIdentity
+$resolvedDashboardDnsName = Resolve-DashboardDnsName -ExplicitName $DashboardDnsName
+$resolvedTlsCertificateThumbprint = Resolve-TlsCertificateThumbprint `
+    -Thumbprint $TlsCertificateThumbprint `
+    -AllowInsecure $AllowInsecureHttpDashboard.IsPresent `
+    -DnsName $resolvedDashboardDnsName
+if (-not $AllowInsecureHttpDashboard) {
+    Ensure-HttpSpns -AccountName $serviceIdentity.SpnAccount -DnsName $resolvedDashboardDnsName
+    Grant-TlsPrivateKeyRead `
+        -Thumbprint $resolvedTlsCertificateThumbprint `
+        -AccountSid $serviceIdentity.AclSid
+}
 $resolvedAuditAdminGroups = @(Resolve-DomainGroupList -RoleName 'AuditAdmin' -GroupNames $AuditAdminGroups)
 $resolvedAuditReaderGroups = @(Resolve-DomainGroupList -RoleName 'AuditReader' -GroupNames $AuditReaderGroups)
 $resolvedMigrationPlannerGroups = @(Resolve-DomainGroupList -RoleName 'MigrationPlanner' -GroupNames $MigrationPlannerGroups)
@@ -553,6 +956,17 @@ $resolvedAllowedCopyTargetRoots = @(
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
         ForEach-Object { Resolve-CopyRoot -Path $_ -ParameterName 'AllowedCopyTargetRoots' } |
         Select-Object -Unique
+)
+$resolvedAllowedCopySourceUncRoots = @(
+    @(
+        foreach ($sourceRoot in ($AllowedCopySourceUncRoots | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+            $resolvedSourceRoot = Resolve-CopyRoot -Path $sourceRoot -ParameterName 'AllowedCopySourceUncRoots'
+            if ($resolvedSourceRoot -notlike '\\*') {
+                throw "AllowedCopySourceUncRoots yalnizca UNC kokleri kabul eder: '$resolvedSourceRoot'."
+            }
+            $resolvedSourceRoot
+        }
+    ) | Select-Object -Unique
 )
 
 if ($EnableArtifactCopy) {
@@ -580,33 +994,45 @@ $administratorsSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-
 $administratorsName = $administratorsSid.Translate([Security.Principal.NTAccount]).Value
 $systemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
 
-$appDir = Join-Path $InstallRoot 'app'
+$liveAppDir = Join-Path $InstallRoot 'app'
+$deploymentId = [Guid]::NewGuid().ToString('N')
+$stagingAppDir = Join-Path $InstallRoot ".staging-$deploymentId"
+$rollbackAppDir = Join-Path $InstallRoot ".rollback-$deploymentId"
+$failedAppDir = Join-Path $InstallRoot ".failed-$deploymentId"
+$appDir = $stagingAppDir
 $appDataDir = Join-Path $appDir 'data'
 $dataDir = Join-Path $InstallRoot 'data'
 $logDir = Join-Path $InstallRoot 'logs'
 
-Ensure-Directory $InstallRoot
-Ensure-Directory $appDir
-Ensure-Directory $appDataDir
-Ensure-Directory $dataDir
-Ensure-Directory $logDir
-Ensure-Directory $CollectorSharePath
+Assert-NoReparsePointInPath -Path (Split-Path $InstallRoot -Parent)
+Initialize-ManagedDirectory -Path $InstallRoot -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'ReadAndExecute'
+Initialize-ManagedDirectory -Path $stagingAppDir -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'ReadAndExecute'
+Initialize-ManagedDirectory -Path $appDataDir -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'Modify'
+Initialize-ManagedDirectory -Path $dataDir -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'Modify'
+Initialize-ManagedDirectory -Path $logDir -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'Modify'
+Initialize-ManagedDirectory -Path $CollectorSharePath -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'ReadAndExecute' -AdditionalReadSid $domainComputers.Sid
 
 $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 $restartOnFailure = $existingService -and $existingService.Status -eq 'Running'
+$deploymentSwapped = $false
 
 try {
-    if ($existingService -and $existingService.Status -ne 'Stopped') {
-        Stop-Service -Name $ServiceName -Force
-        (Get-Service -Name $ServiceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
-    }
-
     if ($usingPublishedBundle) {
+        Assert-NoReparsePointTree -Root $PublishedAppPath
         foreach ($publishedItem in (Get-ChildItem -LiteralPath $PublishedAppPath -Force)) {
             Copy-Item -LiteralPath $publishedItem.FullName -Destination $appDir -Recurse -Force
         }
+        Assert-DirectoryCopyIntegrity -SourceRoot $PublishedAppPath -DestinationRoot $appDir
     }
-    elseif (-not $SkipPublish) {
+    elseif ($SkipPublish) {
+        if (-not (Test-Path -LiteralPath $liveAppDir -PathType Container)) {
+            throw "SkipPublish yalnizca mevcut bir deployment'i yeniden yapilandirabilir; live app dizini bulunamadi: '$liveAppDir'."
+        }
+        foreach ($liveItem in (Get-ChildItem -LiteralPath $liveAppDir -Force)) {
+            Copy-Item -LiteralPath $liveItem.FullName -Destination $appDir -Recurse -Force
+        }
+    }
+    else {
         Push-Location $ProjectPath
         try {
             & $dotnet publish -c Release -o $appDir
@@ -648,6 +1074,11 @@ try {
 
     $collectorDestination = Join-Path $CollectorSharePath 'collector.ps1'
     Copy-Item -LiteralPath $collectorSource -Destination $collectorDestination -Force
+    $collectorSourceHash = (Get-FileHash -LiteralPath $collectorSource -Algorithm SHA256).Hash
+    $collectorDestinationHash = (Get-FileHash -LiteralPath $collectorDestination -Algorithm SHA256).Hash
+    if (-not $collectorSourceHash.Equals($collectorDestinationHash, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "collector.ps1 copy SHA256 dogrulamasi basarisiz."
+    }
 
     $shareReaders = @($domainComputers.Name)
     if (-not [string]::IsNullOrWhiteSpace($serviceIdentity.ShareAccount)) {
@@ -657,6 +1088,13 @@ try {
 
     $productionSettings = @{
         ConnectionStrings = @{ AuditDb = "Data Source=$dataDir\audit.db" }
+        Server = @{
+            HttpsPort = $Port
+            HealthPort = $HealthPort
+            PublicDnsName = $resolvedDashboardDnsName
+            TlsCertificateThumbprint = $resolvedTlsCertificateThumbprint
+            AllowInsecureHttp = $AllowInsecureHttpDashboard.IsPresent
+        }
         Auth = @{
             RoleMappings = @{
                 AuditAdmin = $resolvedAuditAdminGroups
@@ -667,36 +1105,58 @@ try {
         Collector = @{
             PsExecPath = $PsExecPath
             RemoteScriptPath = "\\$env:COMPUTERNAME\$CollectorShareName\collector.ps1"
-            RemoteTempJsonPath = 'C:\temp\o365audit\o365-audit.json'
             DeviceTimeoutSeconds = 300
             MaxDeviceParallelism = 4
             JobPollingSeconds = 10
             DailyRunHour = 2
             DailyRunMinute = 15
             RetryMinutes = @(30, 120, 1440)
+            ExcludeComputersInactiveDays = 120
             FallbackTargets = $resolvedFallbackTargets
-            DefaultOuFilter = ''
+            DefaultOuFilter = $DefaultOuFilter.Trim()
+            DefaultSiteFilter = $DefaultSiteFilter.Trim()
         }
         Copy = @{
             Enabled = $EnableArtifactCopy.IsPresent
             DefaultTargetRoot = $resolvedCopyTargetRoot
             AllowedTargetRoots = $resolvedAllowedCopyTargetRoots
+            AllowedSourceUncRoots = $resolvedAllowedCopySourceUncRoots
             MaxParallelism = 2
             BufferSizeMb = 4
-            VerifySha256 = $CopyVerifySha256.IsPresent
+            VerifySha256 = -not $DisableCopySha256.IsPresent
             MaxAttempts = 2
             PollingSeconds = 5
+        }
+        Retention = @{
+            InventoryDays = 180
+            CopyJobDays = 365
+            InitialDelayMinutes = 5
         }
     }
     $settingsPath = Join-Path $appDir 'appsettings.Production.json'
     $productionSettings | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $settingsPath -Encoding utf8
 
+    Assert-NoReparsePointInPath -Path $InstallRoot
     Set-ManagedDirectoryAcl -Path $InstallRoot -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'ReadAndExecute'
     Set-ManagedDirectoryAcl -Path $appDir -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'ReadAndExecute'
     Set-ManagedDirectoryAcl -Path $appDataDir -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'Modify'
     Set-ManagedDirectoryAcl -Path $dataDir -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'Modify'
     Set-ManagedDirectoryAcl -Path $logDir -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'Modify'
     Set-ManagedDirectoryAcl -Path $CollectorSharePath -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'ReadAndExecute' -AdditionalReadSid $domainComputers.Sid
+
+    if ($existingService -and $existingService.Status -ne 'Stopped') {
+        Stop-Service -Name $ServiceName -Force
+        (Get-Service -Name $ServiceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+    }
+
+    if (Test-Path -LiteralPath $liveAppDir -PathType Container) {
+        Move-Item -LiteralPath $liveAppDir -Destination $rollbackAppDir
+    }
+    Move-Item -LiteralPath $stagingAppDir -Destination $liveAppDir
+    $deploymentSwapped = $true
+    $appDir = $liveAppDir
+    $applicationExe = Join-Path $appDir 'O365AuditTool.exe'
+    $applicationDll = Join-Path $appDir 'O365AuditTool.dll'
 
     $firewallRuleName = "O365AuditTool-$Port"
     Get-NetFirewallRule -DisplayName 'O365AuditTool-*' -ErrorAction SilentlyContinue |
@@ -712,21 +1172,21 @@ try {
     }
 
     $binaryPath = if (Test-Path -LiteralPath $applicationExe -PathType Leaf) {
-        "`"$applicationExe`" --environment Production --urls http://0.0.0.0:$Port"
+        "`"$applicationExe`" --environment Production"
     }
     else {
         if ([string]::IsNullOrWhiteSpace($dotnet)) {
-            $dotnet = Resolve-DotNetPath
-            Assert-DotNet8 -DotNetPath $dotnet -Publishing $false
+            $dotnet = Resolve-DotNetPath -Publishing $false
+            Assert-DotNet10 -DotNetPath $dotnet -Publishing $false
         }
-        "`"$dotnet`" `"$applicationDll`" --environment Production --urls http://0.0.0.0:$Port"
+        "`"$dotnet`" `"$applicationDll`" --environment Production"
     }
     Configure-Service -Name $ServiceName -BinPath $binaryPath -Identity $serviceIdentity
 
     Start-Service -Name $ServiceName
     (Get-Service -Name $ServiceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
 
-    $healthUri = "http://127.0.0.1:$Port/health"
+    $healthUri = "http://127.0.0.1:$HealthPort/health"
     $healthVerified = $false
     for ($attempt = 1; $attempt -le 10; $attempt++) {
         try {
@@ -746,25 +1206,41 @@ try {
     if (-not $healthVerified) {
         throw "Servis basladi ancak health endpoint dogrulanamadi: '$healthUri'. Event Viewer ve servis loglarini kontrol edin."
     }
+
+    Remove-DeploymentDirectory -Path $rollbackAppDir -Root $InstallRoot
 }
 catch {
-    if ($restartOnFailure) {
-        try {
+    try {
+        $failedService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($failedService -and $failedService.Status -ne 'Stopped') {
+            Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+            $failedService.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15))
+        }
+
+        if ($deploymentSwapped -and (Test-Path -LiteralPath $liveAppDir -PathType Container)) {
+            Move-Item -LiteralPath $liveAppDir -Destination $failedAppDir
+        }
+        if (Test-Path -LiteralPath $rollbackAppDir -PathType Container) {
+            Move-Item -LiteralPath $rollbackAppDir -Destination $liveAppDir
+        }
+
+        if ($restartOnFailure -and (Test-Path -LiteralPath $liveAppDir -PathType Container)) {
             Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
         }
-        catch {
-            Write-Warning "Onceki servis yeniden baslatilamadi. Event Viewer ve servis kimligini kontrol edin."
-        }
+    }
+    catch {
+        Write-Warning "Rollback tamamlanamadi. '$rollbackAppDir' ve '$failedAppDir' dizinlerini, Event Viewer'i ve servis kimligini kontrol edin."
     }
     throw
 }
 
 Write-Host "Deployment tamamlandi." -ForegroundColor Green
-Write-Host "Dashboard: http://$env:COMPUTERNAME`:$Port" -ForegroundColor Cyan
+$dashboardScheme = if ($AllowInsecureHttpDashboard) { 'http' } else { 'https' }
+Write-Host "Dashboard: $dashboardScheme`://$resolvedDashboardDnsName`:$Port" -ForegroundColor Cyan
 Write-Host "Collector share: \\$env:COMPUTERNAME\$CollectorShareName\collector.ps1" -ForegroundColor Cyan
 Write-Host "Service: $ServiceName ($($serviceIdentity.Type): $($serviceIdentity.ScAccount))" -ForegroundColor Cyan
 if ($EnableArtifactCopy) {
-    Write-Host "Artifact copy: ENABLED -> $resolvedCopyTargetRoot (SHA256: $($CopyVerifySha256.IsPresent))" -ForegroundColor Yellow
+    Write-Host "Artifact copy: ENABLED -> $resolvedCopyTargetRoot (SHA256: $(-not $DisableCopySha256.IsPresent))" -ForegroundColor Yellow
 }
 else {
     Write-Host "Artifact copy: disabled (opt-in icin -EnableArtifactCopy gerekir)" -ForegroundColor DarkYellow

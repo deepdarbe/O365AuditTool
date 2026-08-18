@@ -65,7 +65,7 @@ Dosyalar hesap ve cihaz ayrimini kaybetmeyecek deterministik bir agacta saklanir
     `-- <DeviceName>\
         `-- <ProfileName>\
             |-- PST\
-            |   `-- archive.pst
+            |   `-- archive_<source-hash>.pst
             |-- NK2\
             |   `-- Outlook.nk2
             `-- N2K\
@@ -75,17 +75,18 @@ Dosyalar hesap ve cihaz ayrimini kaybetmeyecek deterministik bir agacta saklanir
 - `UserKey` icin oncelik UPN/e-posta, domain kullanici adi, son olarak SID'dir.
 - Path icin gecersiz karakterler guvenli bir bicimde normalize edilir.
 - Ayni hedef ada dusen farkli kaynaklar deterministik bir suffix/hash ile ayrilir; sessiz overwrite yapilmaz.
+- Ayni fiziksel artefact iki farkli kullanici/profil sahibine cozulurse plan otomatik sahip secmez; user-filtered plan ve operator dogrulamasi isteyerek fail-closed durur.
 - Kaynak yerel path ise worker bunu cihaz admin share path'ine donusturur: `C:\Data\a.pst` → `\\PC-001\C$\Data\a.pst`.
-- UNC kaynak path degistirilmeden kullanilir.
+- UNC kaynak path yalnizca `Copy:AllowedSourceUncRoots` allowlist'inde acikca izin verilen server/share altindaysa kullanilir; varsayilan fail-closed'dur.
 
 ## Iki Asamali Guvenlik Modeli
 
 1. **Plan:** Kesif snapshot'indaki source path, source boyutu/mtime ve hesap-cihaz-profil baglami kalici plan ogelerine yazilir. Bu asama dosya I/O baslatmaz.
 2. **Execute:** Dashboard plan kimligini, hedefi ve oge sayisini gosterir. Kullanici acik onay kutusunu secmeden execute butonu aktif olmaz.
 3. **Server gate:** UI onayi tek basina guven siniri degildir. API `AuditAdmin`, `Copy:Enabled` ve allowed-root kontrolunu yeniden uygular.
-4. **Worker:** Dosya once ayni hedef dizinde gecici `.partial-*` ada kopyalanir. Boyut ve istege bagli SHA-256 dogrulandiktan sonra final ada atomik olarak tasinir.
-5. **Degisim korumasi:** Kaynak boyutu veya mtime kopyalama sirasinda degisirse oge basarisiz/retry durumuna alinir. Acik Outlook PST'sinin tutarli kopyasi varsayilmaz.
-6. **Idempotency:** Mevcut hedef dogrulanabiliyorsa oge `Skipped`; farkli icerik varsa overwrite yerine hata/collision yolu uygulanir.
+4. **Worker:** Dosya once ayni hedef dizinde gecici `.partial-*` ada kopyalanir. Varsayilan SHA-256 ve boyut dogrulamasindan sonra final ada atomik olarak tasinir.
+5. **Degisim korumasi:** Kaynak exclusive acilamiyorsa copy durur ve Outlook'un kapatilmasi veya VSS snapshot kullanilmasi istenir. Hedef dizin zincirinde reparse point/junction bulunursa islem fail-closed olur.
+6. **Idempotency:** Mevcut hedef SHA-256 ile ayniysa oge `Skipped`; farkli icerik varsa overwrite edilmeden hata uretilir.
 
 ## Yetki Sinirlari
 
