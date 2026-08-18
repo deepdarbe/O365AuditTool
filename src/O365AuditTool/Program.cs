@@ -61,7 +61,7 @@ builder.Services.AddDbContext<AuditDbContext>(options =>
 });
 
 builder.Services.AddScoped<IDeviceTargetProvider, ActiveDirectoryTargetProvider>();
-builder.Services.AddScoped<IActiveDirectoryStructureProvider, ActiveDirectoryStructureProvider>();
+builder.Services.AddSingleton<IActiveDirectoryStructureProvider, ActiveDirectoryStructureProvider>();
 builder.Services.AddScoped<IRemoteCollectorRunner, PsExecCollectorRunner>();
 builder.Services.AddScoped<IInventoryIngestionService, InventoryIngestionService>();
 builder.Services.AddScoped<IInventoryQueryService, InventoryQueryService>();
@@ -98,6 +98,7 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<AuditDbContext>();
     db.Database.EnsureCreated();
     DatabaseSchemaBootstrapper.EnsureCurrentSchema(db);
+    DatabaseSchemaBootstrapper.ValidateCurrentSchema(db);
     DatabaseSchemaBootstrapper.ConfigureConcurrentAccess(db);
 }
 
@@ -211,17 +212,38 @@ app.MapGet("/api/security/antiforgery", (HttpContext context, IAntiforgery antif
         return Results.Ok(new { token = tokens.RequestToken });
     })
     .RequireAuthorization("AuditReader");
-app.MapGet("/api/security/session", (HttpContext context) => Results.Ok(new
+app.MapGet("/api/security/session", async (HttpContext context, IAuthorizationService authorization) =>
 {
-    userName = context.User.Identity?.Name,
-    authenticationType = context.User.Identity?.AuthenticationType,
-    isAuthenticated = context.User.Identity?.IsAuthenticated == true
-}))
+    var roles = new List<string>();
+    foreach (var role in new[] { "AuditReader", "MigrationPlanner", "AuditAdmin" })
+    {
+        if ((await authorization.AuthorizeAsync(context.User, role)).Succeeded)
+        {
+            roles.Add(role);
+        }
+    }
+
+    return Results.Ok(new
+    {
+        userName = context.User.Identity?.Name,
+        authenticationType = context.User.Identity?.AuthenticationType,
+        isAuthenticated = context.User.Identity?.IsAuthenticated == true,
+        roles
+    });
+})
     .RequireAuthorization("AuditReader");
 app.MapGet("/health", async (AuditDbContext db, CancellationToken cancellationToken) =>
-    await db.Database.CanConnectAsync(cancellationToken)
+{
+    if (!await db.Database.CanConnectAsync(cancellationToken))
+    {
+        return Results.Json(new { status = "unhealthy", reason = "database connection failed" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    var schemaFailures = DatabaseSchemaBootstrapper.GetSchemaFailures(db);
+    return schemaFailures.Count == 0
         ? Results.Ok(new { status = "healthy" })
-        : Results.StatusCode(StatusCodes.Status503ServiceUnavailable))
+        : Results.Json(new { status = "unhealthy", reason = "database schema validation failed" }, statusCode: StatusCodes.Status503ServiceUnavailable);
+})
     .AllowAnonymous();
 
 app.Run();

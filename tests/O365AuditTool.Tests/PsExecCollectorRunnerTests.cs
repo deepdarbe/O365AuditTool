@@ -20,6 +20,41 @@ public class PsExecCollectorRunnerTests
     public void IsOfflineFailure_DoesNotRetryAuthorizationFailures()
     {
         Assert.False(PsExecCollectorRunner.IsOfflineFailure(5, "Access is denied."));
+        Assert.False(PsExecCollectorRunner.IsOfflineFailure(1, "Couldn't access PC-01: Access is denied."));
+    }
+
+    [Fact]
+    public void TryVerifyFileHash_RejectsTamperedExecutable()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(path, "trusted");
+            var expected = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path)));
+            Assert.True(PsExecCollectorRunner.TryVerifyFileHash(path, expected, out var initialError), initialError);
+
+            File.WriteAllText(path, "tampered");
+            Assert.False(PsExecCollectorRunner.TryVerifyFileHash(path, expected, out var error));
+            Assert.Equal("PsExec SHA256 validation failed.", error);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void BuildCollectorEncodedCommand_PinsScriptHash()
+    {
+        var expected = new string('A', 64);
+        var encoded = PsExecCollectorRunner.BuildCollectorEncodedCommand(
+            "\\\\server\\share\\collector.ps1",
+            expected);
+        var command = System.Text.Encoding.Unicode.GetString(Convert.FromBase64String(encoded));
+
+        Assert.Contains("Get-FileHash", command, StringComparison.Ordinal);
+        Assert.Contains(expected, command, StringComparison.Ordinal);
+        Assert.Contains("\\\\server\\share\\collector.ps1", command, StringComparison.Ordinal);
     }
 
     [Fact]

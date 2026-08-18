@@ -2,8 +2,21 @@
 
 const copyStatusNames = ["Planned", "Queued", "Running", "Completed", "Completed with errors", "Failed"];
 const copyItemStatusNames = ["Planned", "Queued", "Copying", "Completed", "Skipped", "Failed"];
+const jobStatusNames = ["Kuyrukta", "Çalışıyor", "Tamamlandı", "Hatalarla tamamlandı", "Başarısız"];
+const deviceStatuses = {
+  0: ["Başarılı", "ok"],
+  1: ["Çevrimdışı", "offline"],
+  2: ["Hata", "error"],
+  3: ["Kısmi", "offline"],
+  4: ["Zaman aşımı", "warning"]
+};
 let selectedCopyPlan = null;
 let csrfTokenPromise = null;
+let directoryOrganizationalUnits = [];
+let activeScanJobId = null;
+let activeScanTimer = null;
+let activeScanPollFailures = 0;
+const panelLastUpdated = new Map();
 
 function byId(id) {
   return document.getElementById(id);
@@ -13,6 +26,55 @@ function setFeedback(id, message, kind = "muted") {
   const element = byId(id);
   element.textContent = message;
   element.className = `feedback ${kind}`;
+  element.setAttribute("role", kind === "error" ? "alert" : "status");
+  element.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
+}
+
+function setButtonBusy(button, busy, busyLabel) {
+  if (!button.dataset.defaultLabel) {
+    button.dataset.defaultLabel = button.textContent;
+  }
+  button.classList.toggle("busy", busy);
+  button.disabled = busy;
+  button.textContent = busy ? busyLabel : button.dataset.defaultLabel;
+}
+
+function setPanelState(panelId, stampId, state, message) {
+  const panel = byId(panelId);
+  const stamp = byId(stampId);
+  panel.dataset.state = state;
+  panel.setAttribute("aria-busy", state === "loading" ? "true" : "false");
+  stamp.textContent = message;
+  stamp.className = `panel-stamp ${state === "success" || state === "empty" ? "ok" : state === "loading" ? "" : state === "stale" ? "warning" : "error"}`;
+  if (state === "success" || state === "empty") {
+    panelLastUpdated.set(panelId, new Date());
+  }
+}
+
+function getStaleMessage(panelId) {
+  const lastUpdated = panelLastUpdated.get(panelId);
+  return lastUpdated ? `Güncel değil · ${lastUpdated.toLocaleTimeString("tr-TR")}` : "Yüklenemedi";
+}
+
+function setReadiness(id, state, text) {
+  const item = byId(id);
+  item.dataset.state = state;
+  item.textContent = text;
+}
+
+function updateReadinessSummary() {
+  const states = ["readinessSession", "readinessDirectory", "readinessInventory"]
+    .map(id => byId(id).dataset.state);
+  if (states.includes("error")) {
+    byId("readinessTitle").textContent = "Operatör müdahalesi gerekiyor";
+    byId("readinessSummary").textContent = "Hatalı adımı düzeltin ve ilgili yenileme işlemini yeniden çalıştırın.";
+  } else if (states.every(state => state === "ok")) {
+    byId("readinessTitle").textContent = "Audit görünümü hazır";
+    byId("readinessSummary").textContent = "AD kapsamı seçilebilir ve güncel envanter sonuçları raporlanabilir.";
+  } else {
+    byId("readinessTitle").textContent = "İlk tarama için hazırlanıyor";
+    byId("readinessSummary").textContent = "Windows oturumu ve AD yapısı hazır olduğunda bir OU veya site seçin.";
+  }
 }
 
 function getErrorMessage(error, fallback) {
@@ -24,6 +86,15 @@ function getErrorMessage(error, fallback) {
 
 async function fetchJson(url, options) {
   const requestOptions = options ? { ...options } : {};
+  const timeoutMs = Number(requestOptions.timeoutMs || 60000);
+  delete requestOptions.timeoutMs;
+  const timeoutController = requestOptions.signal ? null : new AbortController();
+  const timeoutHandle = timeoutController
+    ? window.setTimeout(() => timeoutController.abort(), Math.max(1000, timeoutMs))
+    : null;
+  if (timeoutController) {
+    requestOptions.signal = timeoutController.signal;
+  }
   const method = String(requestOptions.method || "GET").toUpperCase();
   requestOptions.credentials = "same-origin";
   if (!["GET", "HEAD", "OPTIONS", "TRACE"].includes(method)) {
@@ -34,14 +105,25 @@ async function fetchJson(url, options) {
 
   let response;
   let responseText = "";
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    response = await fetch(url, requestOptions);
-    responseText = await response.text();
-    const retryableServiceUnavailable = response.status === 503 && response.headers.has("Retry-After");
-    if (!retryableServiceUnavailable || method !== "GET" || attempt === 2) {
-      break;
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      response = await fetch(url, requestOptions);
+      responseText = await response.text();
+      const retryableServiceUnavailable = response.status === 503 && response.headers.has("Retry-After");
+      if (!retryableServiceUnavailable || method !== "GET" || attempt === 2) {
+        break;
+      }
+      await new Promise(resolve => window.setTimeout(resolve, 600 * (attempt + 1)));
     }
-    await new Promise(resolve => window.setTimeout(resolve, 600 * (attempt + 1)));
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("Sunucu zamanında yanıt vermedi. İşlemi yeniden deneyin.");
+    }
+    throw error;
+  } finally {
+    if (timeoutHandle) {
+      window.clearTimeout(timeoutHandle);
+    }
   }
   if (!response.ok) {
     let details = "";
@@ -49,7 +131,7 @@ async function fetchJson(url, options) {
       const problem = responseText ? JSON.parse(responseText) : {};
       details = problem.detail || problem.title || problem.message || "";
     } catch {
-      details = responseText;
+      details = "";
     }
     throw new Error(details || `HTTP ${response.status}`);
   }
@@ -63,9 +145,29 @@ async function fetchJson(url, options) {
 async function loadSession() {
   try {
     const session = await fetchJson("/api/security/session");
-    byId("sessionBadge").textContent = `${session.userName || "Windows kullanıcısı"} · ${session.authenticationType || "Negotiate"}`;
+    const badge = byId("sessionBadge");
+    const authenticationType = String(session.authenticationType || "Negotiate");
+    const normalizedType = authenticationType.toLowerCase();
+    const roles = Array.isArray(session.roles) && session.roles.length ? ` · ${session.roles.join(", ")}` : "";
+    badge.textContent = `${session.userName || "Windows kullanıcısı"} · ${authenticationType}${roles}`;
+    badge.className = "session-badge";
+    if (normalizedType.includes("kerberos")) {
+      badge.classList.add("kerberos");
+      badge.title = "Kerberos ile doğrulandı.";
+    } else if (normalizedType.includes("ntlm")) {
+      badge.classList.add("ntlm");
+      badge.title = "NTLM kullanılıyor; Kerberos SSO devrede değil.";
+    } else {
+      badge.title = "Windows Negotiate kimlik doğrulaması kullanılıyor.";
+    }
+    setReadiness("readinessSession", "ok", "Windows oturumu hazır");
   } catch (error) {
-    byId("sessionBadge").textContent = `Windows oturumu okunamadı · ${getErrorMessage(error, "HTTP hata")}`;
+    const badge = byId("sessionBadge");
+    badge.className = "session-badge auth-error";
+    badge.textContent = `Windows oturumu okunamadı · ${getErrorMessage(error, "HTTP hata")}`;
+    setReadiness("readinessSession", "error", "Oturum doğrulanamadı");
+  } finally {
+    updateReadinessSummary();
   }
 }
 
@@ -92,32 +194,85 @@ function replaceScopeOptions(selectId, items, placeholder, getValue, getLabel) {
   }
 }
 
+function replaceScopeWithError(selectId, message) {
+  const select = byId(selectId);
+  const option = document.createElement("option");
+  option.value = "";
+  option.textContent = message;
+  select.replaceChildren(option);
+  select.disabled = true;
+}
+
+function renderOuOptions(searchTerm = "") {
+  const normalizedSearch = searchTerm.trim().toLocaleLowerCase("tr-TR");
+  const selectedValue = byId("fOu").value;
+  const matches = normalizedSearch
+    ? directoryOrganizationalUnits.filter(item =>
+      [item.displayName, item.name, item.distinguishedName]
+        .filter(Boolean)
+        .some(value => String(value).toLocaleLowerCase("tr-TR").includes(normalizedSearch)))
+    : directoryOrganizationalUnits;
+  const selectedItem = directoryOrganizationalUnits.find(item => item.distinguishedName === selectedValue);
+  if (selectedItem && !matches.includes(selectedItem)) {
+    matches.unshift(selectedItem);
+  }
+  replaceScopeOptions(
+    "fOu",
+    matches,
+    normalizedSearch ? `${matches.length} OU eşleşti` : "Bir OU seçin",
+    item => item.distinguishedName,
+    item => `${"\u00a0\u00a0".repeat(Math.max(0, Number(item.depth || 1) - 1))}${item.displayName || item.name}`);
+}
+
+function updateScanReadiness() {
+  const ouFilter = byId("fOu").value.trim();
+  const siteFilter = byId("fSite").value.trim();
+  const button = byId("startScanButton");
+  const hasScope = Boolean(ouFilter || siteFilter);
+  const isActive = Boolean(activeScanJobId);
+  button.disabled = !hasScope || isActive;
+  button.title = isActive
+    ? `Tarama devam ediyor: ${activeScanJobId}`
+    : hasScope
+      ? "Seçili kapsam için yeni audit taraması başlatır."
+      : "Önce bir OU veya AD site seçin.";
+  byId("scanScopeSummary").textContent = isActive
+    ? `Aktif tarama: ${activeScanJobId}`
+    : hasScope
+      ? `Seçili kapsam: ${ouFilter || "OU seçilmedi"}${ouFilter && siteFilter ? " · " : ""}${siteFilter || ""}${siteFilter ? " · Site filtresi yalnız AD site metadata'sı doğrulanabilen cihazları içerir; OU ile daraltma önerilir." : ""}`
+      : "Tarama başlatmak için bir OU veya AD site seçin.";
+}
+
 async function loadDirectoryStructure() {
   const refreshButton = byId("refreshDirectoryButton");
-  refreshButton.disabled = true;
+  setButtonBusy(refreshButton, true, "AD yapısı yükleniyor");
   setFeedback("directoryFeedback", "Active Directory OU ve site yapısı yükleniyor...");
   try {
-    const structure = await fetchJson("/api/directory/structure");
+    const structure = await fetchJson("/api/directory/structure", { timeoutMs: 35000 });
     const organizationalUnits = Array.isArray(structure?.organizationalUnits) ? structure.organizationalUnits : [];
     const sites = Array.isArray(structure?.sites) ? structure.sites : [];
-    replaceScopeOptions(
-      "fOu",
-      organizationalUnits,
-      "Tüm OU'lar / seçim yapın",
-      item => item.distinguishedName,
-      item => `${"\u00a0\u00a0".repeat(Math.max(0, Number(item.depth || 1) - 1))}${item.displayName || item.name}`);
-    replaceScopeOptions("fSite", sites, "Tüm AD siteleri / seçim yapın", item => item.name, item => item.name);
+    directoryOrganizationalUnits = organizationalUnits;
+    renderOuOptions(byId("fOuSearch").value);
+    replaceScopeOptions("fSite", sites, "Bir AD site seçin", item => item.name, item => item.name);
+    byId("fOuSearch").disabled = false;
     const warnings = Array.isArray(structure?.warnings) ? structure.warnings.filter(Boolean) : [];
     setFeedback(
       "directoryFeedback",
       `${organizationalUnits.length} OU ve ${sites.length} AD site yüklendi · ${structure.domainDistinguishedName || "domain"}${warnings.length ? ` · ${warnings.join(" ")}` : ""}`,
       warnings.length ? "warning" : "ok");
+    setReadiness("readinessDirectory", "ok", `${organizationalUnits.length} OU · ${sites.length} site`);
   } catch (error) {
-    byId("fOu").disabled = true;
-    byId("fSite").disabled = true;
+    directoryOrganizationalUnits = [];
+    replaceScopeWithError("fOu", "OU listesi yüklenemedi");
+    replaceScopeWithError("fSite", "AD site listesi yüklenemedi");
+    byId("fOuSearch").disabled = true;
+    byId("fOuSearch").value = "";
     setFeedback("directoryFeedback", `AD yapısı yüklenemedi: ${getErrorMessage(error, "Bilinmeyen hata")}`, "error");
+    setReadiness("readinessDirectory", "error", "AD yapısı yüklenemedi");
   } finally {
-    refreshButton.disabled = false;
+    setButtonBusy(refreshButton, false);
+    updateScanReadiness();
+    updateReadinessSummary();
   }
 }
 
@@ -247,14 +402,34 @@ function getDeviceFilterQuery() {
 }
 
 async function loadData() {
+  const filterButton = byId("filterDevicesButton");
+  const hadData = byId("deviceRows").childElementCount > 0;
+  setButtonBusy(filterButton, true, "Filtreleniyor");
+  setPanelState("inventory", "devicePanelStamp", "loading", "Yükleniyor");
   setFeedback("deviceFeedback", "Cihaz envanteri yükleniyor...");
   try {
-    const data = asArray(await fetchJson(`/api/inventory/devices?${getDeviceFilterQuery()}`));
+    const query = getDeviceFilterQuery();
+    const data = asArray(await fetchJson(`/api/inventory/devices?${query}`));
     renderStats(data);
-    renderDeviceRows(data);
+    renderDeviceRows(data, query.size > 0);
+    const stamp = `Güncel · ${new Date().toLocaleTimeString("tr-TR")}`;
+    setPanelState("inventory", "devicePanelStamp", data.length ? "success" : "empty", stamp);
     setFeedback("deviceFeedback", `${data.length} cihaz gösteriliyor.`, "ok");
+    setReadiness(
+      "readinessInventory",
+      data.length ? "ok" : "pending",
+      data.length ? `${data.length} cihaz raporlandı` : "İlk tarama bekleniyor");
   } catch (error) {
-    setFeedback("deviceFeedback", `Cihaz verisi yüklenemedi: ${getErrorMessage(error, "Bilinmeyen hata")}`, "error");
+    const state = hadData ? "stale" : "error";
+    setPanelState("inventory", "devicePanelStamp", state, getStaleMessage("inventory"));
+    setFeedback(
+      "deviceFeedback",
+      `${hadData ? "Önceki sonuçlar gösteriliyor; güncel veri alınamadı" : "Cihaz verisi yüklenemedi"}: ${getErrorMessage(error, "Bilinmeyen hata")}`,
+      "error");
+    setReadiness("readinessInventory", "error", hadData ? "Envanter güncel değil" : "Envanter yüklenemedi");
+  } finally {
+    setButtonBusy(filterButton, false);
+    updateReadinessSummary();
   }
 }
 
@@ -275,23 +450,58 @@ function renderStats(data) {
   byId("statStorage").textContent = String(fastStorage);
 }
 
-function renderDeviceRows(data) {
+function appendMobileDefinition(list, label, value) {
+  const wrapper = document.createElement("div");
+  const term = document.createElement("dt");
+  const description = document.createElement("dd");
+  term.textContent = label;
+  description.textContent = value || "-";
+  wrapper.append(term, description);
+  list.appendChild(wrapper);
+}
+
+function appendMobileDeviceCard(fragment, device, status, details) {
+  const card = document.createElement("details");
+  card.className = "mobile-device-card";
+  const summary = document.createElement("summary");
+  const summaryMain = document.createElement("div");
+  const name = document.createElement("span");
+  name.className = "device-name";
+  name.textContent = device.deviceName || "Bilinmeyen cihaz";
+  const summaryLine = document.createElement("span");
+  summaryLine.className = "device-summary";
+  summaryLine.textContent = `${details.lastUser} · ${details.pstGb} GB PST`;
+  summaryMain.append(name, document.createElement("br"), summaryLine);
+  const statusElement = document.createElement("span");
+  statusElement.className = status[1];
+  statusElement.textContent = status[0];
+  summary.append(summaryMain, statusElement);
+
+  const body = document.createElement("dl");
+  body.className = "mobile-device-body";
+  appendMobileDefinition(body, "OU / Site", `${device.ou || "-"} · ${device.site || "-"}`);
+  appendMobileDefinition(body, "IP adresleri", formatIpAddresses(device.ipAddresses));
+  appendMobileDefinition(body, "Seri numarası", device.serialNumber || "-");
+  appendMobileDefinition(body, "Profiller / hesaplar", details.accountText);
+  appendMobileDefinition(body, "Disk / volume", `${details.diskText}\n${details.volumeText}`);
+  appendMobileDefinition(body, "Office", details.officeText);
+  appendMobileDefinition(body, "PST / Legacy", details.artifactText);
+  appendMobileDefinition(body, "Tarama sonucu", `${device.errorMessage || "Hata yok"}\n${formatDate(device.collectedUtc)}`);
+  card.append(summary, body);
+  fragment.appendChild(card);
+}
+
+function renderDeviceRows(data, hasFilters = false) {
   const body = byId("deviceRows");
   const fragment = document.createDocumentFragment();
-  const deviceStatuses = {
-    0: ["Success", "ok"],
-    1: ["Offline", "offline"],
-    2: ["Error", "error"],
-    3: ["Partial", "offline"],
-    4: ["Timeout", "warning"]
-  };
+  const mobileFragment = document.createDocumentFragment();
 
   data.forEach(device => {
     const row = document.createElement("tr");
     appendCell(row, device.deviceName || "-");
     appendCell(row, device.ou || "-");
     appendCell(row, device.site || "-");
-    const status = deviceStatuses[Number(device.status)] || [String(device.status ?? "Unknown"), "muted"];
+    const status = deviceStatuses[Number(device.status)] || [String(device.status ?? "Bilinmiyor"), "muted"];
     appendStatusCell(row, status[0], status[1]);
     appendCell(row, device.serialNumber || "-");
     appendCell(row, formatIpAddresses(device.ipAddresses));
@@ -302,15 +512,15 @@ function renderDeviceRows(data) {
         : device.lastLoggedOnUser || "-");
 
     const profileLines = (device.profiles || []).map(profile =>
-      `Profil | ${profile.userName || profile.sid || "Unknown"} | ${profile.profileName || "Windows profile"}${profile.loaded ? " | loaded" : ""}${profile.isDefault ? " | default" : ""}`);
+      `Profil | ${profile.userName || profile.sid || "Bilinmiyor"} | ${profile.profileName || "Windows profili"}${profile.loaded ? " | yüklü" : ""}${profile.isDefault ? " | varsayılan" : ""}`);
     const accountLines = (device.mailAccounts || []).map(account =>
-      `Hesap | ${account.address || "Unknown"} | ${account.accountType || "Unknown"} | ${account.profileName || "Default"}${account.isActive ? " | active" : ""}`);
+      `Hesap | ${account.address || "Bilinmiyor"} | ${account.accountType || "Bilinmiyor"} | ${account.profileName || "Varsayılan"}${account.isActive ? " | aktif" : ""}`);
     const accountText = [...profileLines, ...accountLines].join("\n") || "-";
     const accountCell = appendCell(row, accountText);
     accountCell.style.whiteSpace = "pre-line";
 
     const diskText = (device.disks || [])
-      .map(disk => `${disk.mediaType || "Unknown"} | ${disk.busType || disk.interfaceType || "Unknown"} | ${disk.model || ""}`.trim())
+      .map(disk => `${disk.mediaType || "Bilinmiyor"} | ${disk.busType || disk.interfaceType || "Bilinmiyor"} | ${disk.model || ""}`.trim())
       .join("\n") || "-";
     const diskCell = appendCell(row, diskText);
     diskCell.style.whiteSpace = "pre-line";
@@ -328,12 +538,12 @@ function renderDeviceRows(data) {
         product.architecture,
         product.productIds,
         product.updateChannel,
-        product.updatesEnabled === false ? "updates disabled" : null
+        product.updatesEnabled === false ? "güncellemeler kapalı" : null
       ].filter(Boolean).join(" | "))
       .filter(Boolean);
     const officeProcesses = (device.officeProcesses || [])
       .filter(process => process.isRunning)
-      .map(process => `${process.processName || "Office"} PID ${process.pid || "?"} | ${process.owner || "owner unknown"}`);
+      .map(process => `${process.processName || "Office"} PID ${process.pid || "?"} | ${process.owner || "sahip bilinmiyor"}`);
     const officeText = [
       ...officeProducts.map(product => `Kurulu | ${product}`),
       ...officeProcesses.map(process => `Çalışıyor | ${process}`)
@@ -345,9 +555,9 @@ function renderDeviceRows(data) {
 
     const artifactText = [
       ...(device.pstFiles || []).map(file =>
-        `PST | ${file.userPrincipalName || file.sid || "Unknown"} | ${file.profileName || "?"} | ${file.path} | ${formatBytes(file.sizeBytes)}`),
+        `PST | ${file.userPrincipalName || file.sid || "Bilinmiyor"} | ${file.profileName || "?"} | ${file.path} | ${formatBytes(file.sizeBytes)}`),
       ...(device.legacyFiles || []).map(file =>
-        `${file.artifactType || "NK2"} | ${file.userPrincipalName || file.userName || file.sid || "Unknown"} | ${file.profileName || "?"} | ${file.path} | ${formatBytes(file.sizeBytes)}`)
+        `${file.artifactType || "NK2"} | ${file.userPrincipalName || file.userName || file.sid || "Bilinmiyor"} | ${file.profileName || "?"} | ${file.path} | ${formatBytes(file.sizeBytes)}`)
     ].join("\n") || "-";
     const artifactCell = appendCell(row, artifactText);
     artifactCell.style.whiteSpace = "pre-line";
@@ -355,13 +565,31 @@ function renderDeviceRows(data) {
     appendCell(row, device.errorMessage || "-");
     appendCell(row, formatDate(device.collectedUtc));
     fragment.appendChild(row);
+    appendMobileDeviceCard(mobileFragment, device, status, {
+      lastUser: device.currentLoggedOnUser || device.lastLoggedOnUser || "Kullanıcı yok",
+      pstGb: (Number(device.pstTotalBytes || 0) / (1024 ** 3)).toFixed(1),
+      accountText,
+      diskText,
+      volumeText,
+      officeText,
+      artifactText
+    });
   });
 
   body.replaceChildren(fragment);
-  byId("deviceEmpty").classList.toggle("visible", data.length === 0);
+  byId("deviceCards").replaceChildren(mobileFragment);
+  const empty = byId("deviceEmpty");
+  empty.textContent = hasFilters
+    ? "Seçili kapsam veya filtrelerle eşleşen cihaz yok. İlk tarama yapılmadıysa kapsamı seçip taramayı başlatın."
+    : "Henüz envanter verisi yok. Bir OU veya AD site seçip ilk taramayı başlatın.";
+  empty.classList.toggle("visible", data.length === 0);
 }
 
 async function loadLicenseRecommendations() {
+  const refreshButton = byId("refreshLicensesButton");
+  const hadData = byId("licenseRows").childElementCount > 0;
+  setButtonBusy(refreshButton, true, "Yükleniyor");
+  setPanelState("licenses", "licensePanelStamp", "loading", "Yükleniyor");
   setFeedback("licenseFeedback", "Lisans önerileri yükleniyor...");
   try {
     const recommendations = asArray(await fetchJson("/api/licenses/recommendations"));
@@ -381,9 +609,20 @@ async function loadLicenseRecommendations() {
     });
     body.replaceChildren(fragment);
     byId("licenseEmpty").classList.toggle("visible", recommendations.length === 0);
+    setPanelState(
+      "licenses",
+      "licensePanelStamp",
+      recommendations.length ? "success" : "empty",
+      `Güncel · ${new Date().toLocaleTimeString("tr-TR")}`);
     setFeedback("licenseFeedback", `${recommendations.length} kullanıcı için PST kapasite tahmini gösteriliyor; satın alma öncesi tenant doğrulaması zorunludur.`, "ok");
   } catch (error) {
-    setFeedback("licenseFeedback", `Lisans önerileri yüklenemedi: ${getErrorMessage(error, "Bilinmeyen hata")}`, "error");
+    setPanelState("licenses", "licensePanelStamp", hadData ? "stale" : "error", getStaleMessage("licenses"));
+    setFeedback(
+      "licenseFeedback",
+      `${hadData ? "Önceki kapasite tahminleri gösteriliyor; yenileme başarısız" : "Lisans önerileri yüklenemedi"}: ${getErrorMessage(error, "Bilinmeyen hata")}`,
+      "error");
+  } finally {
+    setButtonBusy(refreshButton, false);
   }
 }
 
@@ -404,15 +643,32 @@ function getLegacyFilterQuery() {
 }
 
 async function loadLegacyFiles() {
+  const filterButton = byId("filterLegacyButton");
+  const hadData = byId("legacyRows").childElementCount > 0;
+  setButtonBusy(filterButton, true, "Filtreleniyor");
+  setPanelState("legacy", "legacyPanelStamp", "loading", "Yükleniyor");
   setFeedback("legacyFeedback", "NK2/N2K envanteri yükleniyor...");
   try {
     const files = asArray(await fetchJson(`/api/inventory/legacy-files?${getLegacyFilterQuery()}`));
     renderLegacyRows(files);
     byId("statLegacy").textContent = String(files.length);
+    setPanelState(
+      "legacy",
+      "legacyPanelStamp",
+      files.length ? "success" : "empty",
+      `Güncel · ${new Date().toLocaleTimeString("tr-TR")}`);
     setFeedback("legacyFeedback", `${files.length} legacy artefact gösteriliyor.`, "ok");
   } catch (error) {
-    byId("statLegacy").textContent = "-";
-    setFeedback("legacyFeedback", `Legacy dosyalar yüklenemedi: ${getErrorMessage(error, "Bilinmeyen hata")}`, "error");
+    if (!hadData) {
+      byId("statLegacy").textContent = "-";
+    }
+    setPanelState("legacy", "legacyPanelStamp", hadData ? "stale" : "error", getStaleMessage("legacy"));
+    setFeedback(
+      "legacyFeedback",
+      `${hadData ? "Önceki legacy kayıtları gösteriliyor; yenileme başarısız" : "Legacy dosyalar yüklenemedi"}: ${getErrorMessage(error, "Bilinmeyen hata")}`,
+      "error");
+  } finally {
+    setButtonBusy(filterButton, false);
   }
 }
 
@@ -431,7 +687,7 @@ function renderLegacyRows(files) {
     pathCell.title = file.path || "";
     appendCell(row, formatBytes(file.sizeBytes));
     appendCell(row, formatDate(file.lastWriteUtc));
-    appendStatusCell(row, file.existsOnDisk === false ? "Unavailable" : "Available", file.existsOnDisk === false ? "error" : "ok");
+    appendStatusCell(row, file.existsOnDisk === false ? "Erişilemiyor" : "Erişilebilir", file.existsOnDisk === false ? "error" : "ok");
     fragment.appendChild(row);
   });
 
@@ -439,10 +695,87 @@ function renderLegacyRows(files) {
   byId("legacyEmpty").classList.toggle("visible", files.length === 0);
 }
 
+function normalizeJobStatus(value) {
+  if (typeof value === "number" || /^\d+$/.test(String(value))) {
+    return jobStatusNames[Number(value)] || String(value);
+  }
+  const names = {
+    queued: "Kuyrukta",
+    running: "Çalışıyor",
+    completed: "Tamamlandı",
+    completedwitherrors: "Hatalarla tamamlandı",
+    failed: "Başarısız"
+  };
+  return names[String(value || "").toLowerCase()] || String(value || "Bilinmiyor");
+}
+
+function isTerminalJobStatus(value) {
+  return [2, 3, 4].includes(Number(value)) || ["completed", "completedwitherrors", "failed"]
+    .includes(String(value || "").toLowerCase());
+}
+
+function renderScanProgress(job) {
+  const stats = job?.deviceStats || {};
+  const total = Number(stats.total || 0);
+  const completed = ["success", "offline", "error", "partial", "timeout"]
+    .reduce((sum, key) => sum + Number(stats[key] || 0), 0);
+  const status = normalizeJobStatus(job?.status);
+  const progress = byId("scanProgressBar");
+  byId("scanProgress").hidden = false;
+  byId("scanProgressTitle").textContent = `Tarama ${status.toLocaleLowerCase("tr-TR")} · ${job.id || activeScanJobId}`;
+  byId("scanProgressDetail").textContent = total
+    ? `${completed}/${total} sonuç · ${stats.success || 0} başarılı · ${stats.offline || 0} çevrimdışı · ${(stats.error || 0) + (stats.partial || 0) + (stats.timeout || 0)} hata/kısmi`
+    : "Hedef cihaz listesi hazırlanıyor.";
+  if (total > 0) {
+    progress.max = total;
+    progress.value = Math.min(completed, total);
+  } else {
+    progress.removeAttribute("value");
+  }
+}
+
+async function pollScanJob(jobId) {
+  if (activeScanJobId !== jobId) {
+    return;
+  }
+  try {
+    const job = await fetchJson(`/api/jobs/${encodeURIComponent(jobId)}`);
+    activeScanPollFailures = 0;
+    renderScanProgress(job);
+    if (isTerminalJobStatus(job.status)) {
+      activeScanJobId = null;
+      activeScanTimer = null;
+      setButtonBusy(byId("startScanButton"), false);
+      updateScanReadiness();
+      const status = normalizeJobStatus(job.status);
+      setFeedback("deviceFeedback", `Tarama ${status.toLocaleLowerCase("tr-TR")}: ${jobId}. Envanter yenileniyor.`, Number(job.status) === 4 || String(job.status).toLowerCase() === "failed" ? "error" : "ok");
+      await Promise.allSettled([loadData(), loadLegacyFiles(), loadLicenseRecommendations()]);
+      return;
+    }
+    activeScanTimer = window.setTimeout(() => void pollScanJob(jobId), 2500);
+  } catch (error) {
+    activeScanPollFailures += 1;
+    if (activeScanPollFailures < 5) {
+      setFeedback("deviceFeedback", `Tarama sürüyor; durum geçici olarak okunamadı (${activeScanPollFailures}/5).`, "warning");
+      activeScanTimer = window.setTimeout(() => void pollScanJob(jobId), 5000);
+      return;
+    }
+    activeScanJobId = null;
+    activeScanTimer = null;
+    setButtonBusy(byId("startScanButton"), false);
+    updateScanReadiness();
+    setFeedback("deviceFeedback", `Tarama durum takibi kesildi: ${getErrorMessage(error, "Bilinmeyen hata")}. Job kimliği: ${jobId}`, "error");
+  }
+}
+
 async function startScan() {
   const button = byId("startScanButton");
-  button.disabled = true;
+  if (activeScanJobId) {
+    return;
+  }
+  setButtonBusy(button, true, "Tarama başlatılıyor");
   setFeedback("deviceFeedback", "Tarama kuyruğa alınıyor...");
+  let queued = false;
   try {
     const ouFilter = byId("fOu").value.trim();
     const siteFilter = byId("fSite").value.trim();
@@ -454,11 +787,26 @@ async function startScan() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ouFilter: ouFilter || null, siteFilter: siteFilter || null, manual: true })
     });
-    setFeedback("deviceFeedback", `Tarama kuyruğa alındı: ${result.jobId || result.id || "-"}`, "ok");
+    activeScanJobId = result.jobId || result.id;
+    if (!activeScanJobId) {
+      throw new Error("Tarama API yanıtında job kimliği bulunamadı.");
+    }
+    queued = true;
+    activeScanPollFailures = 0;
+    setFeedback("deviceFeedback", `Tarama kuyruğa alındı: ${activeScanJobId}`, "ok");
+    updateScanReadiness();
+    byId("scanProgress").hidden = false;
+    byId("scanProgressTitle").textContent = "Tarama kuyrukta";
+    byId("scanProgressDetail").textContent = `Job kimliği: ${activeScanJobId}`;
+    byId("scanProgressBar").removeAttribute("value");
+    void pollScanJob(activeScanJobId);
   } catch (error) {
     setFeedback("deviceFeedback", `Tarama başlatılamadı: ${getErrorMessage(error, "AuditAdmin yetkisini kontrol edin.")}`, "error");
   } finally {
-    button.disabled = false;
+    if (!queued) {
+      setButtonBusy(button, false);
+      updateScanReadiness();
+    }
   }
 }
 
@@ -488,7 +836,7 @@ async function createCopyPlan(event) {
   };
 
   const submitButton = byId("copyPlanForm").querySelector('button[type="submit"]');
-  submitButton.disabled = true;
+  setButtonBusy(submitButton, true, "Plan oluşturuluyor");
   setFeedback("copyFeedback", "Copy planı oluşturuluyor...");
   try {
     const plan = await fetchJson("/api/copy/plans", {
@@ -501,7 +849,7 @@ async function createCopyPlan(event) {
   } catch (error) {
     setFeedback("copyFeedback", `Plan oluşturulamadı: ${getErrorMessage(error, "MigrationPlanner yetkisini ve Copy ayarlarını kontrol edin.")}`, "error");
   } finally {
-    submitButton.disabled = false;
+    setButtonBusy(submitButton, false);
   }
 }
 
@@ -510,6 +858,20 @@ function normalizeCopyStatus(value) {
     return copyStatusNames[Number(value)] || String(value);
   }
   return String(value || "Unknown");
+}
+
+function translateCopyStatus(value) {
+  const names = {
+    planned: "Planlandı",
+    queued: "Kuyrukta",
+    running: "Çalışıyor",
+    completed: "Tamamlandı",
+    "completed with errors": "Hatalarla tamamlandı",
+    completedwitherrors: "Hatalarla tamamlandı",
+    failed: "Başarısız"
+  };
+  const normalized = normalizeCopyStatus(value);
+  return names[normalized.toLowerCase()] || normalized;
 }
 
 function normalizeCopyItemStatus(value) {
@@ -538,13 +900,28 @@ function isPlanned(status) {
 }
 
 async function loadCopyPlans() {
+  const refreshButton = byId("refreshPlansButton");
+  const hadData = byId("copyPlanRows").childElementCount > 0;
+  setButtonBusy(refreshButton, true, "Yükleniyor");
+  setPanelState("copy-plans", "copyPanelStamp", "loading", "Yükleniyor");
   setFeedback("copyFeedback", "Copy planları yükleniyor...");
   try {
     const plans = asArray(await fetchJson("/api/copy/plans"));
     renderCopyPlans(plans);
+    setPanelState(
+      "copy-plans",
+      "copyPanelStamp",
+      plans.length ? "success" : "empty",
+      `Güncel · ${new Date().toLocaleTimeString("tr-TR")}`);
     setFeedback("copyFeedback", `${plans.length} copy planı gösteriliyor.`, "ok");
   } catch (error) {
-    setFeedback("copyFeedback", `Copy planları yüklenemedi: ${getErrorMessage(error, "Bilinmeyen hata")}`, "error");
+    setPanelState("copy-plans", "copyPanelStamp", hadData ? "stale" : "error", getStaleMessage("copy-plans"));
+    setFeedback(
+      "copyFeedback",
+      `${hadData ? "Önceki planlar gösteriliyor; yenileme başarısız" : "Copy planları yüklenemedi"}: ${getErrorMessage(error, "Bilinmeyen hata")}`,
+      "error");
+  } finally {
+    setButtonBusy(refreshButton, false);
   }
 }
 
@@ -562,7 +939,7 @@ function renderCopyPlans(plans) {
 
     const idCell = appendCell(row, id || "-");
     idCell.className = "path-cell";
-    appendStatusCell(row, normalizeCopyStatus(plan.status), copyStatusClass(plan.status));
+    appendStatusCell(row, translateCopyStatus(plan.status), copyStatusClass(plan.status));
     const targetCell = appendCell(row, plan.targetRoot || "-", "path-cell");
     targetCell.title = plan.targetRoot || "";
     appendCell(row, plan.requestedBy || "-");
@@ -573,10 +950,10 @@ function renderCopyPlans(plans) {
     const actionCell = document.createElement("td");
     const executeButton = document.createElement("button");
     executeButton.type = "button";
-    executeButton.textContent = "Execute";
+    executeButton.textContent = "İncele ve başlat";
     executeButton.className = "danger";
     executeButton.disabled = !isPlanned(plan.status) || !id || totalItems === 0;
-    executeButton.addEventListener("click", () => openExecuteDialog({ ...plan, id, totalItems }));
+    executeButton.addEventListener("click", () => void openExecuteDialog({ ...plan, id, totalItems }));
     actionCell.appendChild(executeButton);
     row.appendChild(actionCell);
     fragment.appendChild(row);
@@ -586,19 +963,55 @@ function renderCopyPlans(plans) {
   byId("copyPlansEmpty").classList.toggle("visible", plans.length === 0);
 }
 
-function openExecuteDialog(plan) {
-  selectedCopyPlan = plan;
-  byId("executeSummary").textContent =
-    `Plan: ${plan.id}\nHedef: ${plan.targetRoot || "-"}\nÖğe sayısı: ${plan.totalItems}`;
+async function openExecuteDialog(planSummary) {
+  selectedCopyPlan = null;
+  const acknowledgement = byId("executeAcknowledgement");
+  const confirmButton = byId("confirmExecuteButton");
+  acknowledgement.checked = false;
+  acknowledgement.disabled = true;
+  setButtonBusy(confirmButton, false);
+  confirmButton.disabled = true;
+  byId("executeSummary").textContent = `Plan ayrıntıları yükleniyor: ${planSummary.id}`;
   byId("executeSummary").style.whiteSpace = "pre-line";
-  byId("executeAcknowledgement").checked = false;
-  byId("confirmExecuteButton").disabled = true;
   byId("executeDialog").showModal();
+  try {
+    const plan = await fetchJson(`/api/copy/plans/${encodeURIComponent(planSummary.id)}`);
+    const items = Array.isArray(plan?.items) ? plan.items : [];
+    const totalBytes = items.reduce((total, item) => total + Number(item.sourceSizeBytes || 0), 0);
+    const snapshotDates = items
+      .map(item => item.sourceLastWriteUtc)
+      .filter(Boolean)
+      .map(value => new Date(value))
+      .filter(date => !Number.isNaN(date.getTime()))
+      .sort((left, right) => left - right);
+    if (!isPlanned(plan.status) || items.length === 0) {
+      throw new Error("Plan artık yürütülebilir durumda değil veya kaynak öğe içermiyor.");
+    }
+    selectedCopyPlan = { ...plan, id: plan.id || planSummary.id, totalItems: items.length, totalBytes };
+    acknowledgement.disabled = false;
+    byId("executeSummary").textContent = [
+      `Plan: ${selectedCopyPlan.id}`,
+      `Hedef: ${plan.targetRoot || "-"}`,
+      `İsteyen: ${plan.requestedBy || "-"}`,
+      `Kaynak: ${items.length} dosya · ${formatBytes(totalBytes)}`,
+      `Snapshot aralığı: ${snapshotDates.length ? `${formatDate(snapshotDates[0])} - ${formatDate(snapshotDates.at(-1))}` : "bilinmiyor"}`,
+      "Çakışma politikası: overwrite yok; aynı hash atlanır, farklı içerik hata verir.",
+      "Hedef boş alanı API tarafından raporlanmıyor; onaydan önce share kapasitesini doğrulayın."
+    ].join("\n");
+  } catch (error) {
+    byId("executeSummary").textContent = `Plan doğrulanamadı: ${getErrorMessage(error, "Bilinmeyen hata")}`;
+    setFeedback("copyFeedback", `Plan yürütme öncesi doğrulanamadı: ${getErrorMessage(error, "Bilinmeyen hata")}`, "error");
+  }
 }
 
 function closeExecuteDialog() {
   selectedCopyPlan = null;
-  byId("executeDialog").close();
+  byId("executeAcknowledgement").disabled = true;
+  setButtonBusy(byId("confirmExecuteButton"), false);
+  byId("confirmExecuteButton").disabled = true;
+  if (byId("executeDialog").open) {
+    byId("executeDialog").close();
+  }
 }
 
 async function executeCopyPlan() {
@@ -608,7 +1021,7 @@ async function executeCopyPlan() {
 
   const planId = selectedCopyPlan.id;
   const button = byId("confirmExecuteButton");
-  button.disabled = true;
+  setButtonBusy(button, true, "Kuyruğa alınıyor");
   setFeedback("copyFeedback", `Plan execute kuyruğuna alınıyor: ${planId}`);
   try {
     await fetchJson(`/api/copy/plans/${encodeURIComponent(planId)}/execute`, { method: "POST" });
@@ -617,25 +1030,66 @@ async function executeCopyPlan() {
     await loadCopyPlans();
   } catch (error) {
     setFeedback("copyFeedback", `Copy başlatılamadı: ${getErrorMessage(error, "AuditAdmin yetkisini ve sunucu Copy opt-in ayarını kontrol edin.")}`, "error");
-    button.disabled = false;
+    setButtonBusy(button, false);
   }
 }
 
+function resetDeviceReportFilters() {
+  ["fDevice", "fUser", "fDiskType", "fOfficeVersion", "fStatus", "fPstMinGb", "fPstMaxGb"]
+    .forEach(id => {
+      byId(id).value = "";
+    });
+  void loadData();
+}
+
 function bindEvents() {
-  byId("filterDevicesButton").addEventListener("click", loadData);
+  byId("deviceFilterForm").addEventListener("submit", event => {
+    event.preventDefault();
+    void loadData();
+  });
+  byId("resetDeviceFiltersButton").addEventListener("click", resetDeviceReportFilters);
   byId("startScanButton").addEventListener("click", startScan);
   byId("refreshDirectoryButton").addEventListener("click", loadDirectoryStructure);
+  byId("fOuSearch").addEventListener("input", event => {
+    renderOuOptions(event.target.value);
+    updateScanReadiness();
+  });
+  ["fOu", "fSite"].forEach(id => byId(id).addEventListener("change", updateScanReadiness));
   byId("exportCsvButton").addEventListener("click", exportCsv);
   byId("exportPdfButton").addEventListener("click", exportPdf);
-  byId("filterLegacyButton").addEventListener("click", loadLegacyFiles);
+  byId("legacyFilterForm").addEventListener("submit", event => {
+    event.preventDefault();
+    void loadLegacyFiles();
+  });
   byId("refreshLicensesButton").addEventListener("click", loadLicenseRecommendations);
   byId("copyPlanForm").addEventListener("submit", createCopyPlan);
   byId("refreshPlansButton").addEventListener("click", loadCopyPlans);
   byId("cancelExecuteButton").addEventListener("click", closeExecuteDialog);
   byId("executeAcknowledgement").addEventListener("change", event => {
-    byId("confirmExecuteButton").disabled = !event.target.checked;
+    byId("confirmExecuteButton").disabled = !event.target.checked || !selectedCopyPlan;
   });
   byId("confirmExecuteButton").addEventListener("click", executeCopyPlan);
+  byId("executeDialog").addEventListener("close", () => {
+    selectedCopyPlan = null;
+  });
+  byId("deviceFilterForm").addEventListener("keydown", event => {
+    if (event.key !== "Escape") {
+      return;
+    }
+    event.preventDefault();
+    if (event.target === byId("fOuSearch")) {
+      byId("fOuSearch").value = "";
+      renderOuOptions();
+      updateScanReadiness();
+      return;
+    }
+    resetDeviceReportFilters();
+  });
+  window.addEventListener("beforeunload", () => {
+    if (activeScanTimer) {
+      window.clearTimeout(activeScanTimer);
+    }
+  });
 }
 
 document.addEventListener("DOMContentLoaded", () => {

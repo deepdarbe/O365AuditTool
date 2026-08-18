@@ -1,25 +1,98 @@
-# O365 Legacy Artifact Discovery ve Copy Plan Mimarisi
+# O365 Migration Audit Runtime ve Copy Mimarisi
 
 ## Amac
 
-Bu katman PST envanterine ek olarak tum Windows kullanici profillerindeki Outlook `.nk2` ve `.n2k` legacy autocomplete dosyalarini raporlar. Kesfedilen PST/NK2/N2K dosyalari dogrudan kopyalanmaz; once degismez bir inventory snapshot'ina bagli copy plani olusturulur, ardindan yetkili kullanici hedefi ve oge sayisini gorerek plani acikca execute eder.
+Sistem Windows oturumuyla kimlik dogrulanan merkezi dashboard'dan AD hedef kesfi, agentless PsExec collector calistirma, tum kullanici profillerinde envanter toplama, raporlama ve kontrollu migration copy akislarini yonetir. Kesfedilen PST/NK2/N2K dosyalari dogrudan kopyalanmaz; once degismez bir inventory snapshot'ina bagli copy plani olusturulur, ardindan yetkili kullanici hedefi ve oge sayisini gorerek plani acikca execute eder.
 
-## Uctan Uca Akis
+## Runtime Bilesenleri
 
 ```mermaid
-flowchart LR
-    A["AD cihaz kesfi"] --> B["PsExec collector"]
-    B --> C["Tum yerel profiller"]
-    C --> D["PST + NK2/N2K metadata"]
-    D --> E["SQLite inventory snapshot"]
-    E --> F["POST /api/copy/plans"]
-    F --> G["Persisted plan: source + destination"]
-    G --> H{"AuditAdmin acik onayi"}
-    H -->|Onay yok| G
-    H -->|Execute| I["Copy worker queue"]
-    I --> J["Temp copy + size/hash verify"]
-    J --> K["Atomic final destination"]
+flowchart TB
+    subgraph Client["Yonetici istemcisi"]
+        Browser["Tarayici\nmevcut Windows oturumu"]
+    end
+
+    subgraph Management["Yonetim sunucusu"]
+        Edge["HTTPS dashboard + API\nNegotiate / RBAC / CSRF"]
+        Directory["AD discovery\nRootDSE + OU/site + DN fallback"]
+        Orchestrator["Scan orchestrator\nmanual + zamanlanmis + retry"]
+        Ingest["JSON ingest + validation"]
+        Database[("SQLite WAL\ninventory + jobs + copy plans")]
+        Reports["Dashboard + CSV + PDF\nreadiness + lisans tahmini"]
+        Copy["Copy worker\nallowlist + hash + atomic move"]
+        Logs["JSONL diagnostics\nhealth + trace code"]
+        Share["SMB collector share"]
+    end
+
+    subgraph Domain["Active Directory ve endpointler"]
+        AD[("AD DS\nOU + sites + computers")]
+        Endpoint["Windows endpoint\ntum yerel profiller"]
+        Source["PST / NK2 / N2K\nkaynak dosyalari"]
+    end
+
+    subgraph Destination["Migration hedefi"]
+        Target["SMB target root\nUser / Device / Profile / Type"]
+    end
+
+    Browser -->|"Kerberos veya NTLM"| Edge
+    Edge --> Directory
+    Directory --> AD
+    Edge --> Orchestrator
+    Orchestrator -->|"AD computer scope"| AD
+    Orchestrator -->|"PsExec + ADMIN$"| Endpoint
+    Share --> Endpoint
+    Endpoint -->|"metadata JSON"| Ingest
+    Endpoint --> Source
+    Ingest --> Database
+    Database --> Reports
+    Reports --> Edge
+    Database --> Copy
+    Copy -->|"acik operator onayi sonrasi"| Source
+    Copy --> Target
+    Edge --> Logs
+    Orchestrator --> Logs
+    Copy --> Logs
 ```
+
+## Tarama ve Retry Akisi
+
+```mermaid
+sequenceDiagram
+    actor Operator as Audit operatoru
+    participant UI as Dashboard
+    participant API as ASP.NET Core API
+    participant AD as Active Directory
+    participant Queue as Scan queue
+    participant PC as Endpoint collector
+    participant DB as SQLite
+
+    Operator->>UI: OU veya site secer
+    UI->>API: POST /api/jobs/scan + CSRF
+    API->>AD: Kapsamdaki bilgisayarlari sorgular
+    AD-->>API: Computer listesi ve DN bilgisi
+    API->>Queue: Job ve cihaz denemelerini yazar
+    loop Her hedef cihaz
+        Queue->>PC: PsExec ile collector.ps1
+        alt Cihaz erisilebilir
+            PC-->>Queue: Donanim + Office + profil + artefact JSON
+            Queue->>DB: Validate ve inventory snapshot yaz
+        else Offline veya timeout
+            Queue->>DB: Durum + hata + sonraki retry zamani
+        end
+    end
+    DB-->>UI: Filtreli inventory ve job durumu
+```
+
+AD OU/site endpoint'i LDAP gecici hatalarinda sinirli retry uygular. RootDSE sonucu alinamazsa yapilandirilmis scan base, sonrasinda bilinen bilgisayar distinguished name kayitlari kullanilir. Bu fallback yalnizca secim agacini ayakta tutar; tarama API'si yine acik OU veya site kapsami olmadan domain-geneli manuel tarama baslatmaz.
+
+## Kimlik, Guven Sinirlari ve Gozlemlenebilirlik
+
+- Dashboard mevcut Windows oturumunu `Negotiate` ile kullanir; parola uygulamaya girilmez veya saklanmaz.
+- `AuditReader`, `MigrationPlanner` ve `AuditAdmin` rolleri AD grup eslemeleriyle sunucu tarafinda uygulanir.
+- Mutasyon endpoint'leri antiforgery token ister; UI onayi tek basina yetki siniri degildir.
+- Public HTTPS portu dashboard icindir. Loopback health portu yalnizca yerel servis kontrolu icin kullanilir.
+- API hatalari hassas exception ayrintisi yerine trace code dondurur; ayrintili JSONL kayitlar sunucuda kalir.
+- Collector sonucu guvenilmeyen endpoint girdisi kabul edilir ve kalici envantere yazilmadan once boyut/alan sinirlariyla validate edilir.
 
 ## Discovery Modeli
 

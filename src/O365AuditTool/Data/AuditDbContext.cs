@@ -16,6 +16,13 @@ public class AuditDbContext(DbContextOptions<AuditDbContext> options) : DbContex
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        // Keep table names stable across releases; these names were used by the original schema.
+        modelBuilder.Entity<StorageVolume>().ToTable("Volumes");
+        modelBuilder.Entity<DiskInfo>().ToTable("Disks");
+        modelBuilder.Entity<OfficeProduct>().ToTable("OfficeProducts");
+        modelBuilder.Entity<OfficeProcess>().ToTable("OfficeProcesses");
+        modelBuilder.Entity<MailProfile>().ToTable("Profiles");
+
         modelBuilder.Entity<ScanJob>()
             .HasMany(x => x.Devices)
             .WithOne()

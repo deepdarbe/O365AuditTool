@@ -1,0 +1,72 @@
+name: Hata bildirimi
+description: Kurulum, dashboard, tarama, envanter veya kopyalama hatasi bildirin.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Uretim verisi, parola, PAT, PST icerigi veya hassas AD bilgisini eklemeyin. Guvenlik aciklarini public issue olarak bildirmeyin.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Etkilenen alan
+      options:
+        - Kurulum / guncelleme
+        - Windows SSO / RBAC
+        - AD OU ve site kesfi
+        - PsExec collector / tarama
+        - Dashboard / raporlama
+        - PST / NK2 / N2K envanteri
+        - Migration copy plani
+        - Diger
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Surum
+      description: Dashboard veya release surumu (ornegin v1.1.5).
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Ortam
+      description: Windows Server surumu, domain functional level ve tarayici. Gercek domain/host adlarini maskeleyin.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Tekrarlama adimlari
+      description: Hatayi tekrar olusturan en kucuk adim listesini yazin.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Beklenen sonuc
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Gerceklesen sonuc
+      description: Dashboard izleme kodunu ve sanitize edilmis hata metnini ekleyin.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Tanilama bilgisi
+      description: Get-O365AuditDiagnostics.ps1 ozetini veya ilgili log satirlarini hassas verileri temizleyerek ekleyin.
+      render: shell
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Veri guvenligi
+      options:
+        - label: Parola, token, PST icerigi ve gercek kullanici verisi eklemedim.
+          required: true

@@ -20,7 +20,7 @@ Script su uc kimlik seceneginden tam olarak birini zorunlu tutar:
 2. `-ServiceCredential $credential` - `DOMAIN\kullanici` biciminde PSCredential.
 3. `-AllowLocalSystem` - yalnizca acik risk kabuluyla; varsayilan degildir.
 
-`-AutoConfigure` bu alanlar bos birakildiginda LocalSystem'i acikca secer; mevcut bir gMSA veya credential verilirse onu ezmez.
+`-AutoConfigure` ilk kurulumda bu alanlar bos birakildiginda LocalSystem'i acikca secer. Mevcut kurulumda parametre verilmezse SCM'deki gMSA/credential/LocalSystem kimligi ve Production ayarlari korunur.
 
 ## Otonom Ilk Kurulum
 
@@ -202,7 +202,8 @@ Copy ozelligi deployment'ta fail-closed ve varsayilan olarak kapalidir. Sadece i
 
 Parametre davranisi:
 
-- `-EnableArtifactCopy`: Worker'in plan execute etmesine izin verir. Switch yoksa plan execution sunucu tarafinda reddedilir.
+- `-EnableArtifactCopy`: Ilk kurulumda worker'in plan execute etmesine izin verir.
+- `-DisableArtifactCopy`: Mevcut opt-in ayarini acikca kapatir. `-EnableArtifactCopy` ile birlikte kullanilamaz.
 - `-CopyTargetRoot`: Dashboard formunda hedef bos birakildiginda kullanilan varsayilan koktur.
 - `-AllowedCopyTargetRoots`: Kullanici girdisinin cikamayacagi guvenli kok listesidir. Varsayilan hedef bu koklerden birine esit veya onun altinda olmalidir.
 - SHA-256 varsayilan olarak aciktir. Yalnizca acik risk kabuluyla `-DisableCopySha256` kullanilabilir; mevcut hedef dosya yine hash olmadan `Skipped` sayilmaz.
@@ -237,7 +238,7 @@ Uretilen Production ayari:
 }
 ```
 
-Guvenlik nedeniyle yeniden deployment'ta `-EnableArtifactCopy` verilmezse `Copy:Enabled` tekrar `false` yazilir. Onceki opt-in sessizce korunmaz.
+Yeniden deployment'ta mevcut `Copy:Enabled`, hedef kokler, hash tercihi ve performans ayarlari korunur. Copy'yi kapatmak icin acik `-DisableArtifactCopy` gerekir.
 
 ## Dogrulanmis Self-contained Bundle Deployment
 
@@ -307,15 +308,15 @@ Fallback hedefleri varsayilan olarak bostur; `PC-001` ve `PC-002` uretilmez. AD 
 
 Ayni komut tekrar calistirilabilir:
 
-- Mevcut servis silinmez; durdurulup binary path, kimlik ve recovery ayarlari guncellenir.
+- Mevcut servis silinmez; parametre verilmediyse servis kimligi korunur, binary path ve recovery ayarlari guncellenir.
 - Mevcut SMB share ayni fiziksel yolu kullaniyorsa izinler tekrar uygulanir.
 - Ayni isimli share farkli bir path'e gidiyorsa script guvenlik nedeniyle durur.
 - Uygulama staging dizinine publish edilir; servis kisa sure durdurularak dizin atomik degistirilir.
-- RBAC gruplari ve istege bagli fallback hedefleri Production override'a yeniden yazilir.
-- Copy opt-in, hedef kokler ve SHA-256 tercihi Production override'a yeniden yazilir.
+- Parametre verilmediyse port/TLS, RBAC gruplari, tarama kapsami, fallback hedefleri ve copy ayarlari mevcut Production override'dan korunur.
+- PsExec korumali app dizinine kopyalanir; PsExec ve collector SHA-256 degerleri Production override'a pinlenir ve her taramada yeniden dogrulanir.
 - Terminal scan kayitlari 180 gun, terminal copy job kayitlari 365 gun sonra gunluk retention islemiyle temizlenir; running/queued/planned isler silinmez.
 - Domain profilli firewall kurali olusturulur veya mevcut kural guncellenir.
-- Servis baslatildiktan sonra yalniz loopback'te dinleyen `http://127.0.0.1:<healthPort>/health` endpoint'i otomatik dogrulanir.
+- Servis baslatildiktan sonra yalniz loopback'te dinleyen `http://127.0.0.1:<healthPort>/health` endpoint'i SQLite baglantisini ve kritik tablo/kolon sozlesmesini dogrular.
 - Deployment veya health check hata verirse onceki app dizini geri alinir ve eski servis yeniden baslatilir.
 
 `-SkipPublish` yalniz mevcut `app` dizinini staging'e kopyalayarak ayar/servis yeniden deployment'i yapar. Yeni hazir framework-dependent publish cikisi `-PublishedAppPath` ile verilir ve hedefte .NET 10 ASP.NET Core Runtime gerekir. Self-contained bundle bu gereksinimi kaldirir.

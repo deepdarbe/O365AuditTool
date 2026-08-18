@@ -1,4 +1,5 @@
 ﻿using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using O365AuditTool.Data;
 using O365AuditTool.Models;
 
@@ -155,6 +156,7 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
             });
         }
 
+        await RemovePreviousAttemptAsync(jobId, target.Name, cancellationToken);
         dbContext.Devices.Add(device);
         await dbContext.SaveChangesAsync(cancellationToken);
         return device;
@@ -180,6 +182,7 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
             RawPayloadJson = "{}"
         };
 
+        await RemovePreviousAttemptAsync(jobId, target.Name, cancellationToken);
         dbContext.Devices.Add(device);
         await dbContext.SaveChangesAsync(cancellationToken);
         return device;
@@ -187,4 +190,9 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
 
     private static string Truncate(string value, int maxLength) =>
         value.Length <= maxLength ? value : value[..maxLength];
+
+    private Task RemovePreviousAttemptAsync(Guid jobId, string deviceName, CancellationToken cancellationToken) =>
+        dbContext.Devices
+            .Where(x => x.ScanJobId == jobId && x.DeviceName.ToUpper() == deviceName.Trim().ToUpper())
+            .ExecuteDeleteAsync(cancellationToken);
 }

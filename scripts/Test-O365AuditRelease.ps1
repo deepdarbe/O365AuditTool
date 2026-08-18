@@ -47,7 +47,11 @@ $archive = [IO.Compression.ZipFile]::OpenRead($ArchivePath)
 try {
     $entries = @{}
     foreach ($entry in $archive.Entries) {
-        $entries[$entry.FullName.Replace('\', '/')] = $entry
+        $entryPath = $entry.FullName.Replace('\', '/')
+        if ($entries.ContainsKey($entryPath)) {
+            throw "Release archive yinelenen entry iceriyor: '$entryPath'."
+        }
+        $entries[$entryPath] = $entry
     }
 
     foreach ($required in @(
@@ -81,8 +85,12 @@ try {
 
     $sha256 = [Security.Cryptography.SHA256]::Create()
     try {
+        $manifestPaths = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
         foreach ($file in @($manifest.Files)) {
             $entryPath = ([string]$file.Path).Replace('\', '/')
+            if (-not $manifestPaths.Add($entryPath)) {
+                throw "Manifest yinelenen dosya iceriyor: '$entryPath'."
+            }
             if (-not $entries.ContainsKey($entryPath)) {
                 throw "Manifest dosyasi archive icinde eksik: '$entryPath'."
             }
@@ -98,6 +106,19 @@ try {
             if (-not $fileHash.Equals([string]$file.Sha256, [StringComparison]::OrdinalIgnoreCase)) {
                 throw "Manifest dosya hash dogrulamasi basarisiz: '$entryPath'."
             }
+        }
+
+        $unexpectedEntries = @(
+            $archive.Entries |
+                Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_.Name) -and
+                    $_.FullName.Replace('\', '/') -ne 'release-manifest.json' -and
+                    -not $manifestPaths.Contains($_.FullName.Replace('\', '/'))
+                } |
+                ForEach-Object { $_.FullName.Replace('\', '/') }
+        )
+        if ($unexpectedEntries.Count -gt 0) {
+            throw "Release archive manifest disi dosya iceriyor: $($unexpectedEntries -join ', ')"
         }
     }
     finally {

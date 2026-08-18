@@ -28,6 +28,7 @@ param(
     [switch]$AllowLocalSystem,
     [switch]$AllowUnsignedPsExec,
     [switch]$EnableArtifactCopy,
+    [switch]$DisableArtifactCopy,
     [string]$CopyTargetRoot = "",
     [string[]]$AllowedCopyTargetRoots = @(),
     [string[]]$AllowedCopySourceUncRoots = @(),
@@ -41,6 +42,11 @@ $ErrorActionPreference = 'Stop'
 if ($CopyVerifySha256 -and $DisableCopySha256) {
     throw 'CopyVerifySha256 ve DisableCopySha256 birlikte kullanilamaz.'
 }
+if ($EnableArtifactCopy -and $DisableArtifactCopy) {
+    throw 'EnableArtifactCopy ve DisableArtifactCopy birlikte kullanilamaz.'
+}
+
+$existingServiceAccountToPreserve = ''
 
 function Assert-Admin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -54,6 +60,24 @@ function Ensure-Directory([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
         New-Item -ItemType Directory -Path $Path -Force | Out-Null
     }
+}
+
+function Get-ObjectPathValue {
+    param(
+        [object]$InputObject,
+        [string[]]$Path,
+        [object]$DefaultValue = $null
+    )
+
+    $current = $InputObject
+    foreach ($segment in $Path) {
+        if ($null -eq $current) { return $DefaultValue }
+        $property = $current.PSObject.Properties[$segment]
+        if ($null -eq $property) { return $DefaultValue }
+        $current = $property.Value
+    }
+    if ($null -eq $current) { return $DefaultValue }
+    return $current
 }
 
 function Assert-NoReparsePointInPath {
@@ -750,7 +774,8 @@ function Resolve-ServiceIdentity {
     $selectedCount = @(
         -not [string]::IsNullOrWhiteSpace($GmsaAccount)
         $null -ne $ServiceCredential
-        $AllowLocalSystem.IsPresent
+        [bool]$AllowLocalSystem
+        -not [string]::IsNullOrWhiteSpace($existingServiceAccountToPreserve)
     ).Where({ $_ }).Count
 
     if ($selectedCount -ne 1) {
@@ -794,6 +819,17 @@ function Resolve-ServiceIdentity {
             Type = 'Credential'
             ScAccount = $userName
             SpnAccount = $userName
+            AclSid = $sid
+            ShareAccount = $sid.Translate([Security.Principal.NTAccount]).Value
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($existingServiceAccountToPreserve)) {
+        $sid = Resolve-AccountSid -AccountName $existingServiceAccountToPreserve
+        return @{
+            Type = 'ExistingCredential'
+            ScAccount = $existingServiceAccountToPreserve
+            SpnAccount = $existingServiceAccountToPreserve
             AclSid = $sid
             ShareAccount = $sid.Translate([Security.Principal.NTAccount]).Value
         }
@@ -985,7 +1021,13 @@ function Configure-Service {
     )
 
     $existing = Get-Service -Name $Name -ErrorAction SilentlyContinue
-    if ($Identity.Type -eq 'Credential') {
+    if ($Identity.Type -eq 'ExistingCredential') {
+        if (-not $existing) {
+            throw 'Korunacak mevcut servis kimligi secildi ancak servis bulunamadi.'
+        }
+        Invoke-ServiceControl -Arguments @('config', $Name, 'start=', 'delayed-auto', 'binPath=', $BinPath, 'DisplayName=', $Name)
+    }
+    elseif ($Identity.Type -eq 'Credential') {
         if ($existing) {
             $escapedName = $Name.Replace("'", "''")
             $cimService = Get-CimInstance -ClassName Win32_Service -Filter "Name='$escapedName'"
@@ -1093,6 +1135,106 @@ if (-not [string]::IsNullOrWhiteSpace($CollectorPath)) {
 }
 
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
+$existingProductionSettings = $null
+$existingSettingsPath = Join-Path $InstallRoot 'app\appsettings.Production.json'
+if ($AutoConfigure -and (Test-Path -LiteralPath $existingSettingsPath -PathType Leaf)) {
+    try {
+        $existingProductionSettings = Get-Content -LiteralPath $existingSettingsPath -Raw | ConvertFrom-Json
+        Write-Host "Mevcut production ayarlari upgrade icin korunacak: '$existingSettingsPath'." -ForegroundColor Cyan
+    }
+    catch {
+        throw "Mevcut production ayarlari okunamadi; guvenli upgrade durduruldu: '$existingSettingsPath'. $($_.Exception.Message)"
+    }
+}
+
+$effectiveArtifactCopyEnabled = [bool]$EnableArtifactCopy
+$effectiveCopyVerifySha256 = -not [bool]$DisableCopySha256
+if ($null -ne $existingProductionSettings) {
+    if (-not $PSBoundParameters.ContainsKey('Port')) {
+        $Port = [int](Get-ObjectPathValue $existingProductionSettings @('Server', 'HttpsPort') $Port)
+    }
+    if (-not $PSBoundParameters.ContainsKey('HealthPort')) {
+        $HealthPort = [int](Get-ObjectPathValue $existingProductionSettings @('Server', 'HealthPort') $HealthPort)
+    }
+    if (-not $PSBoundParameters.ContainsKey('DashboardDnsName')) {
+        $DashboardDnsName = [string](Get-ObjectPathValue $existingProductionSettings @('Server', 'PublicDnsName') $DashboardDnsName)
+    }
+    if (-not $PSBoundParameters.ContainsKey('TlsCertificateThumbprint')) {
+        $TlsCertificateThumbprint = [string](Get-ObjectPathValue $existingProductionSettings @('Server', 'TlsCertificateThumbprint') $TlsCertificateThumbprint)
+    }
+    if (-not $PSBoundParameters.ContainsKey('AllowInsecureHttpDashboard')) {
+        $AllowInsecureHttpDashboard = [bool](Get-ObjectPathValue $existingProductionSettings @('Server', 'AllowInsecureHttp') $false)
+    }
+    if (-not $PSBoundParameters.ContainsKey('DefaultOuFilter')) {
+        $DefaultOuFilter = [string](Get-ObjectPathValue $existingProductionSettings @('Collector', 'DefaultOuFilter') $DefaultOuFilter)
+    }
+    if (-not $PSBoundParameters.ContainsKey('DefaultSiteFilter')) {
+        $DefaultSiteFilter = [string](Get-ObjectPathValue $existingProductionSettings @('Collector', 'DefaultSiteFilter') $DefaultSiteFilter)
+    }
+    if (-not $PSBoundParameters.ContainsKey('FallbackTargets')) {
+        $FallbackTargets = @(Get-ObjectPathValue $existingProductionSettings @('Collector', 'FallbackTargets') @())
+    }
+    if (-not $PSBoundParameters.ContainsKey('CollectorShareName')) {
+        $existingRemoteScriptPath = [string](Get-ObjectPathValue $existingProductionSettings @('Collector', 'RemoteScriptPath') '')
+        if ($existingRemoteScriptPath -match '^\\\\[^\\]+\\([^\\]+)\\') {
+            $CollectorShareName = $Matches[1]
+        }
+    }
+    if (-not $PSBoundParameters.ContainsKey('CollectorSharePath') -and -not [string]::IsNullOrWhiteSpace($CollectorShareName)) {
+        $existingCollectorShare = Get-SmbShare -Name $CollectorShareName -ErrorAction SilentlyContinue
+        if ($null -ne $existingCollectorShare) {
+            $CollectorSharePath = [string]$existingCollectorShare.Path
+        }
+    }
+    if (-not $PSBoundParameters.ContainsKey('AuditAdminGroups')) {
+        $AuditAdminGroups = @(Get-ObjectPathValue $existingProductionSettings @('Auth', 'RoleMappings', 'AuditAdmin') @())
+    }
+    if (-not $PSBoundParameters.ContainsKey('AuditReaderGroups')) {
+        $AuditReaderGroups = @(Get-ObjectPathValue $existingProductionSettings @('Auth', 'RoleMappings', 'AuditReader') @())
+    }
+    if (-not $PSBoundParameters.ContainsKey('MigrationPlannerGroups')) {
+        $MigrationPlannerGroups = @(Get-ObjectPathValue $existingProductionSettings @('Auth', 'RoleMappings', 'MigrationPlanner') @())
+    }
+    if (-not $EnableArtifactCopy -and -not $DisableArtifactCopy) {
+        $effectiveArtifactCopyEnabled = [bool](Get-ObjectPathValue $existingProductionSettings @('Copy', 'Enabled') $false)
+    }
+    if (-not $PSBoundParameters.ContainsKey('CopyTargetRoot')) {
+        $CopyTargetRoot = [string](Get-ObjectPathValue $existingProductionSettings @('Copy', 'DefaultTargetRoot') $CopyTargetRoot)
+    }
+    if (-not $PSBoundParameters.ContainsKey('AllowedCopyTargetRoots')) {
+        $AllowedCopyTargetRoots = @(Get-ObjectPathValue $existingProductionSettings @('Copy', 'AllowedTargetRoots') @())
+    }
+    if (-not $PSBoundParameters.ContainsKey('AllowedCopySourceUncRoots')) {
+        $AllowedCopySourceUncRoots = @(Get-ObjectPathValue $existingProductionSettings @('Copy', 'AllowedSourceUncRoots') @())
+    }
+    if (-not $CopyVerifySha256 -and -not $DisableCopySha256) {
+        $effectiveCopyVerifySha256 = [bool](Get-ObjectPathValue $existingProductionSettings @('Copy', 'VerifySha256') $true)
+    }
+
+    $identityWasProvided =
+        -not [string]::IsNullOrWhiteSpace($GmsaAccount) -or
+        $null -ne $ServiceCredential -or
+        [bool]$AllowLocalSystem
+    if (-not $identityWasProvided) {
+        $escapedServiceName = $ServiceName.Replace("'", "''")
+        $existingCimService = Get-CimInstance -ClassName Win32_Service -Filter "Name='$escapedServiceName'" -ErrorAction SilentlyContinue
+        if ($null -ne $existingCimService) {
+            $existingStartName = [string]$existingCimService.StartName
+            if ($existingStartName -match '^[^\\]+\\[^\\]+\$$') {
+                $GmsaAccount = $existingStartName
+            }
+            elseif ($existingStartName -in @('LocalSystem', 'NT AUTHORITY\SYSTEM')) {
+                $AllowLocalSystem = $true
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($existingStartName)) {
+                $existingServiceAccountToPreserve = $existingStartName
+            }
+        }
+    }
+}
+if ($DisableArtifactCopy) {
+    $effectiveArtifactCopyEnabled = $false
+}
 if ([string]::IsNullOrWhiteSpace($CollectorSharePath)) {
     $CollectorSharePath = Join-Path $InstallRoot 'share'
 }
@@ -1119,12 +1261,14 @@ if (-not $usingPublishedBundle -and -not $SkipPublish) {
     Assert-DotNet10 -DotNetPath $dotnet -Publishing $true
 }
 Assert-PsExec -Path $PsExecPath -AllowUnsigned $AllowUnsignedPsExec.IsPresent
+$psExecSourceHash = (Get-FileHash -LiteralPath $PsExecPath -Algorithm SHA256).Hash.ToUpperInvariant()
 
 if ($AutoConfigure) {
     $selectedIdentityCount = @(
         -not [string]::IsNullOrWhiteSpace($GmsaAccount)
         $null -ne $ServiceCredential
-        $AllowLocalSystem.IsPresent
+        [bool]$AllowLocalSystem
+        -not [string]::IsNullOrWhiteSpace($existingServiceAccountToPreserve)
     ).Where({ $_ }).Count
     if ($selectedIdentityCount -eq 0) {
         $AllowLocalSystem = $true
@@ -1199,7 +1343,7 @@ $resolvedAllowedCopySourceUncRoots = @(
     ) | Select-Object -Unique
 )
 
-if ($EnableArtifactCopy) {
+if ($effectiveArtifactCopyEnabled) {
     if ([string]::IsNullOrWhiteSpace($resolvedCopyTargetRoot)) {
         throw "Artifact copy etkinlestirilemez: -CopyTargetRoot zorunludur."
     }
@@ -1285,6 +1429,16 @@ try {
     }
     Remove-PublishedSampleMappings -ApplicationDirectory $appDir
 
+    $managedToolsDir = Join-Path $appDir 'tools'
+    New-Item -ItemType Directory -Path $managedToolsDir -Force | Out-Null
+    $managedPsExecStagingPath = Join-Path $managedToolsDir 'psexec.exe'
+    Copy-Item -LiteralPath $PsExecPath -Destination $managedPsExecStagingPath -Force
+    $managedPsExecHash = (Get-FileHash -LiteralPath $managedPsExecStagingPath -Algorithm SHA256).Hash.ToUpperInvariant()
+    if (-not $managedPsExecHash.Equals($psExecSourceHash, [StringComparison]::Ordinal)) {
+        throw 'Korumali PsExec copy SHA256 dogrulamasi basarisiz.'
+    }
+    $managedPsExecLivePath = Join-Path $liveAppDir 'tools\psexec.exe'
+
     $collectorSource = $CollectorPath
     if ([string]::IsNullOrWhiteSpace($collectorSource) -and -not [string]::IsNullOrWhiteSpace($repoRoot)) {
         $collectorSource = Join-Path $repoRoot 'scripts\collector.ps1'
@@ -1324,7 +1478,7 @@ try {
     Ensure-CollectorShare -Name $CollectorShareName -Path $CollectorSharePath -AdministratorsAccount $administratorsName -ReadAccounts $shareReaders
 
     $productionSettings = @{
-        ConnectionStrings = @{ AuditDb = "Data Source=$dataDir\audit.db" }
+        ConnectionStrings = @{ AuditDb = "Data Source=$dataDir\audit.db;Default Timeout=30;Pooling=True" }
         Server = @{
             HttpsPort = $Port
             HealthPort = $HealthPort
@@ -1340,39 +1494,42 @@ try {
             }
         }
         Collector = @{
-            PsExecPath = $PsExecPath
+            PsExecPath = $managedPsExecLivePath
+            PsExecSha256 = $managedPsExecHash
             RemoteScriptPath = "\\$env:COMPUTERNAME\$CollectorShareName\collector.ps1"
-            DeviceTimeoutSeconds = 300
-            MaxDeviceParallelism = 4
-            JobPollingSeconds = 10
-            DailyRunHour = 2
-            DailyRunMinute = 15
-            RetryMinutes = @(30, 120, 1440)
-            ExcludeComputersInactiveDays = 120
+            RemoteScriptSha256 = $collectorDestinationHash.ToUpperInvariant()
+            DeviceTimeoutSeconds = [int](Get-ObjectPathValue $existingProductionSettings @('Collector', 'DeviceTimeoutSeconds') 300)
+            MaxDeviceParallelism = [int](Get-ObjectPathValue $existingProductionSettings @('Collector', 'MaxDeviceParallelism') 4)
+            JobPollingSeconds = [int](Get-ObjectPathValue $existingProductionSettings @('Collector', 'JobPollingSeconds') 10)
+            DailyRunHour = [int](Get-ObjectPathValue $existingProductionSettings @('Collector', 'DailyRunHour') 2)
+            DailyRunMinute = [int](Get-ObjectPathValue $existingProductionSettings @('Collector', 'DailyRunMinute') 15)
+            RetryMinutes = @(Get-ObjectPathValue $existingProductionSettings @('Collector', 'RetryMinutes') @(30, 120, 1440))
+            ExcludeComputersInactiveDays = [int](Get-ObjectPathValue $existingProductionSettings @('Collector', 'ExcludeComputersInactiveDays') 120)
             FallbackTargets = $resolvedFallbackTargets
             DefaultOuFilter = $DefaultOuFilter.Trim()
             DefaultSiteFilter = $DefaultSiteFilter.Trim()
         }
         Copy = @{
-            Enabled = $EnableArtifactCopy.IsPresent
+            Enabled = $effectiveArtifactCopyEnabled
             DefaultTargetRoot = $resolvedCopyTargetRoot
             AllowedTargetRoots = $resolvedAllowedCopyTargetRoots
             AllowedSourceUncRoots = $resolvedAllowedCopySourceUncRoots
-            MaxParallelism = 2
-            BufferSizeMb = 4
-            VerifySha256 = -not $DisableCopySha256.IsPresent
-            MaxAttempts = 2
-            PollingSeconds = 5
+            MaxParallelism = [int](Get-ObjectPathValue $existingProductionSettings @('Copy', 'MaxParallelism') 2)
+            BufferSizeMb = [int](Get-ObjectPathValue $existingProductionSettings @('Copy', 'BufferSizeMb') 4)
+            VerifySha256 = $effectiveCopyVerifySha256
+            MaxAttempts = [int](Get-ObjectPathValue $existingProductionSettings @('Copy', 'MaxAttempts') 2)
+            PollingSeconds = [int](Get-ObjectPathValue $existingProductionSettings @('Copy', 'PollingSeconds') 5)
         }
         Retention = @{
-            InventoryDays = 180
-            CopyJobDays = 365
-            InitialDelayMinutes = 5
+            InventoryDays = [int](Get-ObjectPathValue $existingProductionSettings @('Retention', 'InventoryDays') 180)
+            CopyJobDays = [int](Get-ObjectPathValue $existingProductionSettings @('Retention', 'CopyJobDays') 365)
+            InitialDelayMinutes = [int](Get-ObjectPathValue $existingProductionSettings @('Retention', 'InitialDelayMinutes') 5)
         }
         Diagnostics = @{
             LogDirectory = $logDir
         }
     }
+
     $settingsPath = Join-Path $appDir 'appsettings.Production.json'
     $productionSettings | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $settingsPath -Encoding utf8
 
@@ -1479,8 +1636,8 @@ $dashboardScheme = if ($AllowInsecureHttpDashboard) { 'http' } else { 'https' }
 Write-Host "Dashboard: $dashboardScheme`://$resolvedDashboardDnsName`:$Port" -ForegroundColor Cyan
 Write-Host "Collector share: \\$env:COMPUTERNAME\$CollectorShareName\collector.ps1" -ForegroundColor Cyan
 Write-Host "Service: $ServiceName ($($serviceIdentity.Type): $($serviceIdentity.ScAccount))" -ForegroundColor Cyan
-if ($EnableArtifactCopy) {
-    Write-Host "Artifact copy: ENABLED -> $resolvedCopyTargetRoot (SHA256: $(-not $DisableCopySha256.IsPresent))" -ForegroundColor Yellow
+if ($effectiveArtifactCopyEnabled) {
+    Write-Host "Artifact copy: ENABLED -> $resolvedCopyTargetRoot (SHA256: $effectiveCopyVerifySha256)" -ForegroundColor Yellow
 }
 else {
     Write-Host "Artifact copy: disabled (opt-in icin -EnableArtifactCopy gerekir)" -ForegroundColor DarkYellow

@@ -3,7 +3,9 @@
 public class CollectorOptions
 {
     public string PsExecPath { get; set; } = "C:\\Tools\\PsExec\\psexec.exe";
+    public string PsExecSha256 { get; set; } = string.Empty;
     public string RemoteScriptPath { get; set; } = "\\\\filesrv\\audit\\collector.ps1";
+    public string RemoteScriptSha256 { get; set; } = string.Empty;
     public int DeviceTimeoutSeconds { get; set; } = 300;
     public int MaxDeviceParallelism { get; set; } = 4;
     public int JobPollingSeconds { get; set; } = 10;

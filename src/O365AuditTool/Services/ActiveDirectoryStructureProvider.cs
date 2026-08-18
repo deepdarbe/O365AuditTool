@@ -27,8 +27,10 @@ public interface IActiveDirectoryStructureProvider
 
 public sealed class ActiveDirectoryStructureProvider : IActiveDirectoryStructureProvider
 {
+    private static readonly TimeSpan DiscoveryDeadline = TimeSpan.FromSeconds(30);
     private readonly IActiveDirectoryStructureSource _source;
     private readonly ILogger<ActiveDirectoryStructureProvider> _logger;
+    private readonly SemaphoreSlim _discoveryGate = new(1, 1);
 
     public ActiveDirectoryStructureProvider(ILogger<ActiveDirectoryStructureProvider> logger)
         : this(
@@ -55,7 +57,53 @@ public sealed class ActiveDirectoryStructureProvider : IActiveDirectoryStructure
     public async Task<ActiveDirectoryStructure> GetStructureAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var raw = await Task.Run(() => _source.GetStructure(cancellationToken), cancellationToken);
+        if (!await _discoveryGate.WaitAsync(DiscoveryDeadline, cancellationToken))
+        {
+            throw new ActiveDirectoryStructureDiscoveryException(
+                "A previous Active Directory structure discovery call is still running.",
+                new TimeoutException("Active Directory discovery gate timed out."));
+        }
+
+        ActiveDirectoryStructureData raw;
+        var releaseGate = true;
+        var discoveryTask = Task.Run(() => _source.GetStructure(cancellationToken), CancellationToken.None);
+        try
+        {
+            raw = await discoveryTask.WaitAsync(DiscoveryDeadline, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            if (!discoveryTask.IsCompleted)
+            {
+                releaseGate = false;
+                _ = discoveryTask.ContinueWith(
+                    _ => _discoveryGate.Release(),
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+            throw;
+        }
+        catch (TimeoutException ex)
+        {
+            releaseGate = false;
+            _ = discoveryTask.ContinueWith(
+                _ => _discoveryGate.Release(),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            throw new ActiveDirectoryStructureDiscoveryException(
+                "Active Directory structure discovery exceeded its deadline.",
+                ex);
+        }
+        finally
+        {
+            if (releaseGate)
+            {
+                _discoveryGate.Release();
+            }
+        }
+
         var ouByDn = raw.OrganizationalUnits
             .Where(x => !string.IsNullOrWhiteSpace(x.Name) && !string.IsNullOrWhiteSpace(x.DistinguishedName))
             .GroupBy(x => x.DistinguishedName.Trim(), StringComparer.OrdinalIgnoreCase)

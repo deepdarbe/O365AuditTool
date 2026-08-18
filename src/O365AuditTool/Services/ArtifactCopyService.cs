@@ -727,6 +727,7 @@ public sealed class ArtifactCopyService(
             ?? throw new IOException($"Destination directory cannot be resolved: {destinationPath}");
         Directory.CreateDirectory(destinationDirectory);
         ArtifactCopyPath.ValidateNoReparsePoints(destinationDirectory);
+        ArtifactCopyPath.ValidateNoReparsePoints(sourcePath);
 
         await using var source = OpenSourceExclusive(sourcePath);
         var sourceLength = source.Length;

@@ -33,6 +33,7 @@ param(
     [PSCredential]$ServiceCredential,
     [switch]$AllowLocalSystem,
     [switch]$EnableArtifactCopy,
+    [switch]$DisableArtifactCopy,
     [string]$CopyTargetRoot = "",
     [string[]]$AllowedCopyTargetRoots = @(),
     [string[]]$AllowedCopySourceUncRoots = @(),
@@ -44,6 +45,9 @@ param(
 $ErrorActionPreference = 'Stop'
 if ($CopyVerifySha256 -and $DisableCopySha256) {
     throw 'CopyVerifySha256 ve DisableCopySha256 birlikte kullanilamaz.'
+}
+if ($EnableArtifactCopy -and $DisableArtifactCopy) {
+    throw 'EnableArtifactCopy ve DisableArtifactCopy birlikte kullanilamaz.'
 }
 
 function Assert-Administrator {
@@ -346,24 +350,30 @@ try {
         CollectorPath = $collectorScript
         InstallRoot = $InstallRoot
         ServiceName = $ServiceName
-        Port = $Port
-        HealthPort = $HealthPort
-        DashboardDnsName = $DashboardDnsName
-        TlsCertificateThumbprint = $TlsCertificateThumbprint
         PsExecPath = $PsExecPath
-        CollectorSharePath = $CollectorSharePath
-        CollectorShareName = $CollectorShareName
-        DomainComputersGroup = $DomainComputersGroup
-        FallbackTargets = $FallbackTargets
-        DefaultOuFilter = $DefaultOuFilter
-        DefaultSiteFilter = $DefaultSiteFilter
-        AuditAdminGroups = $AuditAdminGroups
-        AuditReaderGroups = $AuditReaderGroups
-        MigrationPlannerGroups = $MigrationPlannerGroups
-        GmsaAccount = $GmsaAccount
-        CopyTargetRoot = $CopyTargetRoot
-        AllowedCopyTargetRoots = $AllowedCopyTargetRoots
-        AllowedCopySourceUncRoots = $AllowedCopySourceUncRoots
+    }
+    foreach ($parameterName in @(
+        'Port',
+        'HealthPort',
+        'DashboardDnsName',
+        'TlsCertificateThumbprint',
+        'CollectorSharePath',
+        'CollectorShareName',
+        'DomainComputersGroup',
+        'FallbackTargets',
+        'DefaultOuFilter',
+        'DefaultSiteFilter',
+        'AuditAdminGroups',
+        'AuditReaderGroups',
+        'MigrationPlannerGroups',
+        'GmsaAccount',
+        'CopyTargetRoot',
+        'AllowedCopyTargetRoots',
+        'AllowedCopySourceUncRoots'
+    )) {
+        if ($PSBoundParameters.ContainsKey($parameterName)) {
+            $deployArguments[$parameterName] = Get-Variable -Name $parameterName -ValueOnly
+        }
     }
     if ($PSBoundParameters.ContainsKey('ServiceCredential')) {
         $deployArguments.ServiceCredential = $ServiceCredential
@@ -379,6 +389,9 @@ try {
     }
     if ($EnableArtifactCopy) {
         $deployArguments.EnableArtifactCopy = $true
+    }
+    if ($DisableArtifactCopy) {
+        $deployArguments.DisableArtifactCopy = $true
     }
     if ($CopyVerifySha256) {
         $deployArguments.CopyVerifySha256 = $true

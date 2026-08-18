@@ -1,5 +1,7 @@
 ﻿using Microsoft.Extensions.Options;
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using O365AuditTool.Models;
 
@@ -27,6 +29,15 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
         {
             return new CollectResult(false, null, $"PsExec not found at '{_options.PsExecPath}'", false);
         }
+        if (!TryVerifyFileHash(_options.PsExecPath, _options.PsExecSha256, out var integrityError))
+        {
+            logger.LogError("PsExec integrity validation failed: {IntegrityError}", integrityError);
+            return new CollectResult(false, null, integrityError, false);
+        }
+        if (!IsSha256(_options.RemoteScriptSha256))
+        {
+            return new CollectResult(false, null, "Collector script SHA256 is missing or invalid.", false);
+        }
 
         using var process = new Process
         {
@@ -49,8 +60,10 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
         process.StartInfo.ArgumentList.Add("-NoProfile");
         process.StartInfo.ArgumentList.Add("-ExecutionPolicy");
         process.StartInfo.ArgumentList.Add("Bypass");
-        process.StartInfo.ArgumentList.Add("-File");
-        process.StartInfo.ArgumentList.Add(_options.RemoteScriptPath);
+        process.StartInfo.ArgumentList.Add("-EncodedCommand");
+        process.StartInfo.ArgumentList.Add(BuildCollectorEncodedCommand(
+            _options.RemoteScriptPath,
+            _options.RemoteScriptSha256));
 
         try
         {
@@ -149,6 +162,13 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
 
     internal static bool IsOfflineFailure(int exitCode, string error)
     {
+        if (error.Contains("access is denied", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("erişim engellendi", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("erişim reddedildi", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         int[] transientNetworkCodes = [53, 64, 67, 121, 1231, 1232, 1460, 1722, 1726];
         if (transientNetworkCodes.Contains(exitCode))
         {
@@ -172,6 +192,52 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
         ];
         return markers.Any(marker => error.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
+
+    internal static bool TryVerifyFileHash(string path, string expectedSha256, out string error)
+    {
+        if (!IsSha256(expectedSha256))
+        {
+            error = "PsExec SHA256 is missing or invalid.";
+            return false;
+        }
+
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var actual = Convert.ToHexString(SHA256.HashData(stream));
+            if (!actual.Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                error = "PsExec SHA256 validation failed.";
+                return false;
+            }
+
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            error = $"PsExec could not be verified: {ex.Message}";
+            return false;
+        }
+    }
+
+    internal static string BuildCollectorEncodedCommand(string scriptPath, string expectedSha256)
+    {
+        if (string.IsNullOrWhiteSpace(scriptPath) || !IsSha256(expectedSha256))
+        {
+            throw new ArgumentException("Collector path and a valid SHA256 are required.");
+        }
+
+        var escapedPath = scriptPath.Replace("'", "''", StringComparison.Ordinal);
+        var command =
+            $"$p='{escapedPath}';$e='{expectedSha256.ToUpperInvariant()}';" +
+            "$a=(Get-FileHash -LiteralPath $p -Algorithm SHA256 -ErrorAction Stop).Hash;" +
+            "if(-not [String]::Equals($a,$e,[StringComparison]::OrdinalIgnoreCase)){throw 'Collector integrity validation failed.'};& $p";
+        return Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
+    }
+
+    private static bool IsSha256(string? value) =>
+        value is { Length: 64 } && value.All(Uri.IsHexDigit);
 
     internal static bool TryNormalizePayload(
         CollectorPayload payload,

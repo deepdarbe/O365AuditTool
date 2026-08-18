@@ -16,4 +16,4 @@
 
 ## Reporting
 
-Report security issues privately to the repository owner. Do not include real credentials, mailbox content, PST files, or production inventory databases in an issue.
+Report security issues through the public release repository's [private vulnerability reporting form](https://github.com/deepdarbe/O365AuditTool-Releases/security/advisories/new). Do not include real credentials, mailbox content, PST files, or production inventory databases in a public issue.

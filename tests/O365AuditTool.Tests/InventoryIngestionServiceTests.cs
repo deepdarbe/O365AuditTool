@@ -198,6 +198,38 @@ public class InventoryIngestionServiceTests
         Assert.Equal(DeviceScanStatus.Timeout, stored.Status);
     }
 
+    [Fact]
+    public async Task RetryResult_ReplacesPreviousAttemptForSameJobAndDevice()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AuditDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AuditDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var job = new ScanJob();
+        db.ScanJobs.Add(job);
+        await db.SaveChangesAsync();
+        var service = new InventoryIngestionService(db);
+
+        await service.SaveFailureAsync(
+            job.Id,
+            new DeviceTarget("PC01"),
+            "offline",
+            DeviceScanStatus.Offline,
+            CancellationToken.None);
+        await service.SavePayloadAsync(
+            job.Id,
+            new DeviceTarget("pc01"),
+            new CollectorPayload { Device = new CollectorDevice { Hostname = "PC01" } },
+            CancellationToken.None);
+
+        var stored = await db.Devices.AsNoTracking().Where(x => x.ScanJobId == job.Id).ToListAsync();
+        Assert.Single(stored);
+        Assert.Equal(DeviceScanStatus.Success, stored[0].Status);
+    }
+
     private static CollectorLegacyFile Legacy(string sid, string path, string type) =>
         new()
         {

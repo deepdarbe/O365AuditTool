@@ -14,11 +14,27 @@ public class ScanJobCoordinator(AuditDbContext dbContext) : IScanJobCoordinator
 {
     public async Task<Guid> EnqueueManualScanAsync(string requestedBy, string? ouFilter, string? siteFilter, CancellationToken cancellationToken)
     {
+        var normalizedOu = string.IsNullOrWhiteSpace(ouFilter) ? null : ouFilter.Trim();
+        var normalizedSite = string.IsNullOrWhiteSpace(siteFilter) ? null : siteFilter.Trim();
+        var activeJobs = await dbContext.ScanJobs
+            .AsNoTracking()
+            .Where(x => x.Status == JobStatus.Queued || x.Status == JobStatus.Running)
+            .OrderByDescending(x => x.CreatedUtc)
+            .Select(x => new { x.Id, x.OuFilter, x.SiteFilter })
+            .ToListAsync(cancellationToken);
+        var duplicate = activeJobs.FirstOrDefault(x =>
+            string.Equals(x.OuFilter, normalizedOu, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(x.SiteFilter, normalizedSite, StringComparison.OrdinalIgnoreCase));
+        if (duplicate is not null)
+        {
+            return duplicate.Id;
+        }
+
         var job = new ScanJob
         {
             RequestedBy = requestedBy,
-            OuFilter = ouFilter,
-            SiteFilter = siteFilter,
+            OuFilter = normalizedOu,
+            SiteFilter = normalizedSite,
             Status = JobStatus.Queued
         };
 
@@ -377,6 +393,7 @@ public class ScanOrchestratorService(
                                     failureStatus);
                                 db.RetryQueue.Remove(retry);
                                 await db.SaveChangesAsync(deviceCancellationToken);
+                                await RefreshJobSummaryAfterRetryAsync(db, retry.ScanJobId, deviceCancellationToken);
                                 return;
                             }
 
@@ -396,6 +413,7 @@ public class ScanOrchestratorService(
                         }
 
                         await db.SaveChangesAsync(deviceCancellationToken);
+                        await RefreshJobSummaryAfterRetryAsync(db, retry.ScanJobId, deviceCancellationToken);
                     }
                     finally
                     {
@@ -411,6 +429,29 @@ public class ScanOrchestratorService(
                     logger.LogError(ex, "Retry queue item {RetryId} failed; it remains queued", retryId);
                 }
             });
+    }
+
+    private static async Task RefreshJobSummaryAfterRetryAsync(
+        AuditDbContext db,
+        Guid jobId,
+        CancellationToken cancellationToken)
+    {
+        var statuses = await db.Devices
+            .AsNoTracking()
+            .Where(x => x.ScanJobId == jobId)
+            .Select(x => x.Status)
+            .ToListAsync(cancellationToken);
+        var job = await db.ScanJobs.SingleOrDefaultAsync(x => x.Id == jobId, cancellationToken);
+        if (job is null)
+        {
+            return;
+        }
+
+        var errorCount = statuses.Count(status => status != DeviceScanStatus.Success);
+        job.Status = errorCount == 0 ? JobStatus.Completed : JobStatus.CompletedWithErrors;
+        job.CompletedUtc = DateTime.UtcNow;
+        job.Notes = $"Targets={statuses.Count}; Errors={errorCount}; RetrySummaryUpdated=true";
+        await db.SaveChangesAsync(cancellationToken);
     }
 
     private async Task RecoverInterruptedJobsAsync(CancellationToken cancellationToken)

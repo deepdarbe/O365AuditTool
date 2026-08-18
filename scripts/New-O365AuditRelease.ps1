@@ -9,7 +9,9 @@ param(
     [ValidateSet('win-x64')]
     [string]$Runtime = 'win-x64',
 
-    [string]$DotNetPath = ""
+    [string]$DotNetPath = "",
+
+    [switch]$AllowDirtyWorktree
 )
 
 $ErrorActionPreference = 'Stop'
@@ -71,6 +73,23 @@ function Resolve-DotNet10SdkPath {
 }
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
+$releaseInputs = @(
+    'src/O365AuditTool',
+    'scripts/Deploy-ManagementServer.ps1',
+    'scripts/collector.ps1',
+    'scripts/Get-O365AuditDiagnostics.ps1',
+    'scripts/Install-O365AuditTool.ps1',
+    'scripts/New-O365AuditRelease.ps1'
+)
+if (-not $AllowDirtyWorktree) {
+    $worktreeStatus = @(& git -C $repoRoot status --porcelain --untracked-files=all -- @releaseInputs 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Release provenance dogrulanamadi: git worktree durumu okunamadi.'
+    }
+    if ($worktreeStatus.Count -gt 0) {
+        throw "Release girdileri commit edilmemis degisiklik iceriyor. Once commit edin veya yalniz yerel test icin -AllowDirtyWorktree kullanin: $($worktreeStatus -join '; ')"
+    }
+}
 $dotnet = Resolve-DotNet10SdkPath -ExplicitPath $DotNetPath
 $projectPath = Join-Path $repoRoot 'src\O365AuditTool\O365AuditTool.csproj'
 if (-not (Test-Path -LiteralPath $projectPath -PathType Leaf)) {

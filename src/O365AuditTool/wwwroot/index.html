@@ -22,6 +22,7 @@
       --shadow: 0 14px 35px rgba(17, 54, 50, 0.08);
     }
     * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
     body {
       margin: 0;
       min-height: 100vh;
@@ -31,6 +32,19 @@
         linear-gradient(145deg, #edf6f3 0%, var(--bg) 45%, #f7f8f3 100%);
       color: var(--ink);
     }
+    .skip-link {
+      position: fixed;
+      z-index: 100;
+      top: 8px;
+      left: 8px;
+      padding: 9px 12px;
+      border-radius: 7px;
+      transform: translateY(-160%);
+      background: #fff;
+      color: var(--accent-strong);
+      font-weight: 700;
+    }
+    .skip-link:focus { transform: translateY(0); }
     header {
       position: relative;
       overflow: hidden;
@@ -48,6 +62,7 @@
       border: 44px solid rgba(255, 255, 255, 0.07);
       border-radius: 50%;
     }
+    .hero-inner { position: relative; z-index: 1; width: min(1450px, 100%); margin: 0 auto; }
     header h1 { margin: 0; max-width: 840px; font-family: Georgia, serif; font-size: clamp(25px, 4vw, 38px); font-weight: 500; }
     header p { margin: 8px 0 0; max-width: 760px; color: #cce1dc; }
     .session-badge {
@@ -62,7 +77,20 @@
       color: #e8f5f2;
       font: 12px Consolas, monospace;
     }
-    .session-badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #68d5bd; }
+    .session-badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #9db7b1; }
+    .session-badge.kerberos::before { background: #68d5bd; }
+    .session-badge.ntlm::before { background: #f5bd53; }
+    .session-badge.auth-error::before { background: #ff7a7f; }
+    .quick-nav { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 16px; }
+    .quick-nav a {
+      padding: 6px 10px;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 999px;
+      color: #dcece8;
+      font-size: 12px;
+      text-decoration: none;
+    }
+    .quick-nav a:hover, .quick-nav a:focus-visible { background: rgba(255, 255, 255, 0.12); color: #fff; }
     .wrap { width: min(1520px, 100%); margin: 0 auto; padding: 22px clamp(14px, 3vw, 34px) 38px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 11px; }
     .card, .panel {
@@ -76,7 +104,11 @@
     .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
     .value { margin-top: 5px; font-family: Georgia, serif; font-size: 28px; font-weight: 700; }
     .panel { margin-top: 18px; padding: 18px; }
+    .panel[data-state="loading"] { border-top-color: var(--accent); }
+    .panel[data-state="stale"] { border-color: #d9a24f; }
+    .panel[data-state="error"] { border-color: #d98f92; }
     .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 13px; }
+    .head-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
     .section-head h2 { margin: 0; font-family: Georgia, serif; font-size: 21px; font-weight: 600; }
     .section-head p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
     .pill {
@@ -90,8 +122,57 @@
       letter-spacing: 0.04em;
       text-transform: uppercase;
     }
+    .panel-stamp {
+      flex: 0 0 auto;
+      padding: 5px 9px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: #f8fbfa;
+      color: var(--muted);
+      font: 11px Consolas, monospace;
+      white-space: nowrap;
+    }
+    .panel-stamp.ok { border-color: #a8d5ca; background: #edf8f5; }
+    .panel-stamp.warning { border-color: #e3c17f; background: var(--warn-soft); }
+    .panel-stamp.error { border-color: #e0a4a7; background: var(--error-soft); }
+    .readiness-strip {
+      display: grid;
+      grid-template-columns: minmax(230px, 1.2fr) minmax(360px, 2fr) auto;
+      gap: 18px;
+      align-items: center;
+      margin-top: 14px;
+      padding: 14px 16px;
+      border: 1px solid #bcd3cf;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.78);
+      box-shadow: var(--shadow);
+    }
+    .readiness-strip h2 { margin: 2px 0 3px; font: 600 18px Georgia, serif; }
+    .readiness-strip p { margin: 0; color: var(--muted); font-size: 12px; }
+    .eyebrow { color: var(--accent) !important; font-size: 10px !important; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; }
+    .readiness-list { display: flex; gap: 9px; flex-wrap: wrap; margin: 0; padding: 0; list-style: none; }
+    .readiness-list li { padding: 6px 9px; border-radius: 7px; background: #edf2f1; color: var(--muted); font-size: 12px; }
+    .readiness-list li::before { content: "○"; margin-right: 6px; }
+    .readiness-list li[data-state="ok"] { background: #e8f5f1; color: var(--accent-strong); }
+    .readiness-list li[data-state="ok"]::before { content: "✓"; }
+    .readiness-list li[data-state="error"] { background: var(--error-soft); color: var(--error); }
+    .readiness-list li[data-state="error"]::before { content: "!"; }
+    .readiness-link { color: var(--accent-strong); font-size: 12px; font-weight: 800; white-space: nowrap; }
     .toolbar, .form-grid { display: flex; gap: 9px; flex-wrap: wrap; align-items: end; }
     .toolbar { margin: 12px 0; }
+    .scope-zone { margin: 12px 0; padding: 12px; border: 1px solid #bdd5d0; border-radius: 9px; background: #f2f8f6; }
+    .scope-zone .toolbar { margin: 8px 0; }
+    .scope-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+    .scope-head strong { font: 600 15px Georgia, serif; }
+    .scope-head span, .scope-summary { color: var(--muted); font-size: 12px; }
+    details.filter-box { margin: 10px 0; border: 1px solid var(--border); border-radius: 9px; background: #fbfcfc; }
+    details.filter-box > summary { cursor: pointer; padding: 10px 12px; color: var(--accent-strong); font-size: 13px; font-weight: 800; }
+    details.filter-box .toolbar { padding: 0 12px 12px; }
+    .action-bar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin: 11px 0; }
+    .action-group { display: flex; gap: 8px; flex-wrap: wrap; }
+    .scan-progress { display: grid; gap: 7px; margin: 10px 0; padding: 11px 12px; border-radius: 8px; background: #eaf4f1; color: var(--accent-strong); font-size: 12px; }
+    .scan-progress[hidden] { display: none; }
+    progress { width: 100%; height: 8px; accent-color: var(--accent); }
     .field { display: grid; gap: 5px; flex: 1 1 170px; }
     .field.wide { flex-basis: 330px; }
     label, legend { color: var(--muted); font-size: 12px; font-weight: 700; }
@@ -107,6 +188,7 @@
       font-size: 13px;
     }
     input:focus, select:focus { outline: 3px solid rgba(20, 99, 86, 0.16); border-color: var(--accent); }
+    :focus-visible { outline: 3px solid rgba(20, 99, 86, 0.32); outline-offset: 2px; }
     button {
       min-height: 39px;
       padding: 8px 13px;
@@ -123,10 +205,15 @@
     button.secondary { border-color: var(--border); background: #fff; color: var(--accent-strong); }
     button.danger { background: var(--error); }
     button:disabled { cursor: not-allowed; opacity: 0.48; }
+    button.busy::before { content: ""; display: inline-block; width: 11px; height: 11px; margin-right: 7px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -2px; }
     .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 9px; }
     table { width: 100%; border-collapse: collapse; background: var(--panel); }
+    table.inventory-table { min-width: 1480px; }
+    caption.sr-only, .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     th, td { border-bottom: 1px solid var(--border); text-align: left; padding: 9px; font-size: 12px; vertical-align: top; }
     th { position: sticky; top: 0; z-index: 1; background: #e8f0ef; color: #284b4d; white-space: nowrap; }
+    .inventory-table th:first-child, .inventory-table td:first-child { position: sticky; left: 0; z-index: 2; background: #fff; box-shadow: 5px 0 8px rgba(16, 42, 44, 0.06); }
+    .inventory-table th:first-child { z-index: 3; background: #e8f0ef; }
     tbody tr:hover { background: #f7fbfa; }
     tbody tr:last-child td { border-bottom: 0; }
     .path-cell { min-width: 260px; max-width: 480px; overflow-wrap: anywhere; font-family: Consolas, monospace; }
@@ -147,6 +234,18 @@
       line-height: 1.5;
     }
     .feedback { min-height: 20px; margin: 10px 0 0; font-size: 13px; }
+    .mobile-device-list { display: none; }
+    .mobile-device-card { margin-bottom: 8px; border: 1px solid var(--border); border-radius: 9px; background: #fff; }
+    .mobile-device-card summary { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; padding: 12px; cursor: pointer; list-style: none; }
+    .mobile-device-card summary::-webkit-details-marker { display: none; }
+    .mobile-device-card summary::after { content: "+"; grid-column: 3; grid-row: 1; align-self: center; color: var(--accent); font-size: 20px; }
+    .mobile-device-card[open] summary::after { content: "−"; }
+    .mobile-device-card .device-name { font-weight: 800; }
+    .mobile-device-card .device-summary { color: var(--muted); font-size: 11px; }
+    .mobile-device-body { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 0 12px 12px; }
+    .mobile-device-body div { min-width: 0; }
+    .mobile-device-body dt { color: var(--muted); font-size: 10px; font-weight: 800; text-transform: uppercase; }
+    .mobile-device-body dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 12px; white-space: pre-line; }
     fieldset {
       display: flex;
       gap: 12px;
@@ -171,6 +270,12 @@
     .confirm-line { display: flex; align-items: flex-start; gap: 8px; margin: 15px 0; color: var(--ink); line-height: 1.4; }
     .confirm-line input { width: auto; min-height: auto; margin-top: 3px; }
     .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (max-width: 900px) {
+      .readiness-strip { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+      .readiness-list { grid-column: 1 / -1; grid-row: 2; }
+      .readiness-link { white-space: normal; }
+    }
     @media (max-width: 720px) {
       header { padding: 22px 18px; }
       .wrap { padding: 14px 10px 28px; }
@@ -178,101 +283,160 @@
       .section-head { display: block; }
       .pill { display: inline-block; margin-top: 8px; }
       .toolbar button, .form-grid button { flex: 1 1 130px; }
+      .readiness-strip { grid-template-columns: 1fr; gap: 10px; }
+      .readiness-link { white-space: normal; }
+      .scope-head, .action-bar { align-items: stretch; flex-direction: column; }
+      .action-group { display: grid; grid-template-columns: 1fr 1fr; }
+      .desktop-inventory { display: none; }
+      .mobile-device-list { display: block; }
+      .mobile-device-body { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
     }
   </style>
 </head>
 <body>
+  <a class="skip-link" href="#mainContent">Ana içeriğe geç</a>
   <header>
-    <h1>O365 Migration Audit</h1>
-    <p>PST, Outlook profilleri, NK2/N2K legacy artefact'leri ve kontrollü migration copy planları için merkezi görünürlük.</p>
-    <div class="session-badge" id="sessionBadge">Windows oturumu doğrulanıyor...</div>
+    <div class="hero-inner">
+      <h1>O365 Migration Audit</h1>
+      <p>PST, Outlook profilleri, NK2/N2K legacy artefact'leri ve kontrollü migration copy planları için merkezi görünürlük.</p>
+      <div class="session-badge" id="sessionBadge">Windows oturumu doğrulanıyor...</div>
+      <nav class="quick-nav" aria-label="Dashboard bölümleri">
+        <a href="#inventory">Keşif</a>
+        <a href="#licenses">PST kapasitesi</a>
+        <a href="#legacy">Legacy dosyalar</a>
+        <a href="#copy-plans">Kopyalama</a>
+      </nav>
+    </div>
   </header>
 
-  <main class="wrap">
+  <main class="wrap" id="mainContent">
     <section class="grid" aria-label="Özet metrikler">
-      <article class="card"><div class="label">Cihazlar</div><div class="value" id="statDevices">-</div></article>
-      <article class="card"><div class="label">Offline</div><div class="value" id="statOffline">-</div></article>
-      <article class="card"><div class="label">Hatalar</div><div class="value" id="statErrors">-</div></article>
-      <article class="card"><div class="label">PST (GB)</div><div class="value" id="statPst">-</div></article>
-      <article class="card"><div class="label">NK2 / N2K</div><div class="value" id="statLegacy">-</div></article>
-      <article class="card"><div class="label">SSD / NVMe</div><div class="value" id="statStorage">-</div></article>
+      <article class="card"><div class="label">Cihazlar</div><div class="value" id="statDevices" aria-live="polite">-</div></article>
+      <article class="card"><div class="label">Çevrimdışı</div><div class="value" id="statOffline" aria-live="polite">-</div></article>
+      <article class="card"><div class="label">Hatalar</div><div class="value" id="statErrors" aria-live="polite">-</div></article>
+      <article class="card"><div class="label">PST (GB)</div><div class="value" id="statPst" aria-live="polite">-</div></article>
+      <article class="card"><div class="label">NK2 / N2K</div><div class="value" id="statLegacy" aria-live="polite">-</div></article>
+      <article class="card"><div class="label">SSD / NVMe</div><div class="value" id="statStorage" aria-live="polite">-</div></article>
     </section>
 
-    <section class="panel" aria-labelledby="deviceTitle">
+    <section class="readiness-strip" aria-labelledby="readinessTitle">
+      <div>
+        <p class="eyebrow">Operasyon durumu</p>
+        <h2 id="readinessTitle">Başlangıç kontrolleri yapılıyor</h2>
+        <p id="readinessSummary">Windows oturumu, AD yapısı ve envanter erişimi denetleniyor.</p>
+      </div>
+      <ol class="readiness-list" aria-label="Hazırlık adımları">
+        <li id="readinessSession" data-state="pending">Windows oturumu</li>
+        <li id="readinessDirectory" data-state="pending">AD yapısı</li>
+        <li id="readinessInventory" data-state="pending">İlk envanter</li>
+      </ol>
+      <a class="readiness-link" href="#inventory">Keşif kapsamına git</a>
+    </section>
+
+    <section class="panel" id="inventory" aria-labelledby="deviceTitle" aria-busy="true" data-state="loading">
       <div class="section-head">
         <div>
           <h2 id="deviceTitle">Cihaz ve PST envanteri</h2>
           <p>En son başarılı/offline tarama sonuçları ve migration readiness görünümü.</p>
         </div>
-        <span class="pill">Inventory</span>
+        <span class="panel-stamp" id="devicePanelStamp">Yükleniyor</span>
       </div>
-      <div class="toolbar">
-        <div class="field wide">
-          <label for="fOu">OU kapsamı</label>
-          <select id="fOu" disabled><option value="">AD OU'ları yükleniyor...</option></select>
+      <form id="deviceFilterForm">
+        <div class="scope-zone">
+          <div class="scope-head">
+            <strong>1. Tarama kapsamını seçin</strong>
+            <span>Domain-geneli manuel tarama güvenlik nedeniyle kapalıdır.</span>
+          </div>
+          <div class="toolbar">
+            <div class="field">
+              <label for="fOuSearch">OU ara</label>
+              <input id="fOuSearch" placeholder="OU adı veya DN" disabled autocomplete="off" />
+            </div>
+            <div class="field wide">
+              <label for="fOu">OU kapsamı</label>
+              <select id="fOu" disabled aria-describedby="directoryFeedback scanScopeSummary"><option value="">AD OU'ları yükleniyor...</option></select>
+            </div>
+            <div class="field">
+              <label for="fSite">AD site (doğrulanabilen cihazlar)</label>
+              <select id="fSite" disabled aria-describedby="directoryFeedback scanScopeSummary"><option value="">AD siteleri yükleniyor...</option></select>
+            </div>
+            <button id="refreshDirectoryButton" class="secondary" type="button">AD yapısını yenile</button>
+          </div>
+          <p class="scope-summary" id="scanScopeSummary">Tarama başlatmak için bir OU veya AD site seçin.</p>
+          <p class="feedback" id="directoryFeedback" role="status" aria-live="polite"></p>
         </div>
-        <div class="field">
-          <label for="fSite">AD site</label>
-          <select id="fSite" disabled><option value="">AD siteleri yükleniyor...</option></select>
+        <details class="filter-box" open>
+          <summary>2. Envanter görünümünü filtreleyin</summary>
+          <div class="toolbar">
+            <div class="field"><label for="fDevice">Cihaz</label><input id="fDevice" placeholder="PC-FIN-001" /></div>
+            <div class="field"><label for="fUser">Kullanıcı / e-posta</label><input id="fUser" placeholder="user@contoso.local" /></div>
+            <div class="field">
+              <label for="fDiskType">Disk tipi</label>
+              <select id="fDiskType">
+                <option value="">Tümü</option><option value="SATA">SATA</option><option value="SSD">SSD</option><option value="NVMe">NVMe</option><option value="HDD">HDD</option>
+              </select>
+            </div>
+            <div class="field"><label for="fOfficeVersion">Office sürümü</label><input id="fOfficeVersion" placeholder="16.0" /></div>
+            <div class="field">
+              <label for="fStatus">Durum</label>
+              <select id="fStatus">
+                <option value="">Tümü</option><option value="Success">Başarılı</option><option value="Offline">Çevrimdışı</option><option value="Error">Hata</option><option value="Partial">Kısmi</option><option value="Timeout">Zaman aşımı</option>
+              </select>
+            </div>
+            <div class="field"><label for="fPstMinGb">Min PST GB</label><input id="fPstMinGb" type="number" min="0" step="0.1" placeholder="Boş = tümü" /></div>
+            <div class="field"><label for="fPstMaxGb">Max PST GB</label><input id="fPstMaxGb" type="number" min="0" step="0.1" placeholder="Boş = tümü" /></div>
+            <button id="filterDevicesButton" type="submit">Filtrele</button>
+            <button id="resetDeviceFiltersButton" class="secondary" type="button">Rapor filtrelerini temizle</button>
+          </div>
+        </details>
+        <div class="action-bar">
+          <button id="startScanButton" type="button" disabled aria-describedby="scanScopeSummary">3. Taramayı başlat</button>
+          <div class="action-group" aria-label="Dışa aktarma işlemleri">
+            <button id="exportCsvButton" class="secondary" type="button">CSV indir</button>
+            <button id="exportPdfButton" class="secondary" type="button">Executive PDF indir</button>
+          </div>
         </div>
-        <div class="field"><label for="fDevice">Cihaz</label><input id="fDevice" placeholder="PC-FIN-001" /></div>
-        <div class="field"><label for="fUser">Kullanıcı / e-posta</label><input id="fUser" placeholder="user@contoso.local" /></div>
-        <div class="field">
-          <label for="fDiskType">Disk tipi</label>
-          <select id="fDiskType">
-            <option value="">Tümü</option>
-            <option value="SATA">SATA</option>
-            <option value="SSD">SSD</option>
-            <option value="NVMe">NVMe</option>
-            <option value="HDD">HDD</option>
-          </select>
-        </div>
-        <div class="field"><label for="fOfficeVersion">Office sürümü</label><input id="fOfficeVersion" placeholder="16.0" /></div>
-        <div class="field">
-          <label for="fStatus">Durum</label>
-          <select id="fStatus">
-            <option value="">Tümü</option>
-            <option value="Success">Success</option>
-            <option value="Offline">Offline</option>
-            <option value="Error">Error</option>
-            <option value="Partial">Partial</option>
-            <option value="Timeout">Timeout</option>
-          </select>
-        </div>
-        <div class="field"><label for="fPstMinGb">Min PST GB</label><input id="fPstMinGb" type="number" min="0" step="0.1" placeholder="Boş = tümü" /></div>
-        <div class="field"><label for="fPstMaxGb">Max PST GB</label><input id="fPstMaxGb" type="number" min="0" step="0.1" placeholder="Boş = tümü" /></div>
-        <button id="filterDevicesButton" type="button">Filtrele</button>
-        <button id="startScanButton" type="button">Tarama başlat</button>
-        <button id="refreshDirectoryButton" class="secondary" type="button">AD yenile</button>
-        <button id="exportCsvButton" class="secondary" type="button">CSV</button>
-        <button id="exportPdfButton" class="secondary" type="button">Executive PDF</button>
+      </form>
+      <div class="scan-progress" id="scanProgress" role="status" aria-live="polite" hidden>
+        <strong id="scanProgressTitle">Tarama hazırlanıyor</strong>
+        <span id="scanProgressDetail">Hedef cihazlar kuyruğa alınıyor.</span>
+        <progress id="scanProgressBar" aria-label="Tarama ilerlemesi"></progress>
       </div>
-      <p class="feedback" id="directoryFeedback" role="status" aria-live="polite"></p>
-      <div class="table-wrap">
-        <table>
+      <p class="feedback" id="deviceFeedback" role="status" aria-live="polite"></p>
+      <div class="table-wrap desktop-inventory">
+        <table class="inventory-table">
+          <caption class="sr-only">Cihaz, kullanıcı, donanım, Office ve Outlook artefact envanteri</caption>
           <thead>
             <tr>
-              <th>Cihaz</th><th>OU</th><th>Site</th><th>Durum</th><th>Seri no</th><th>IP adresleri</th><th>Son kullanıcı</th><th>Profiller / hesaplar</th><th>Disk</th><th>Volume boş / toplam</th><th>Office / process</th><th>PST GB</th><th>PST / Legacy detay</th><th>Tarama hatası</th><th>Veri toplandı</th>
+              <th scope="col">Cihaz</th><th scope="col">OU</th><th scope="col">Site</th><th scope="col">Durum</th><th scope="col">Seri no</th><th scope="col">IP adresleri</th><th scope="col">Son kullanıcı</th><th scope="col">Profiller / hesaplar</th><th scope="col">Disk</th><th scope="col">Volume boş / toplam</th><th scope="col">Office / process</th><th scope="col">PST GB</th><th scope="col">PST / Legacy detay</th><th scope="col">Tarama hatası</th><th scope="col">Veri toplandı</th>
             </tr>
           </thead>
           <tbody id="deviceRows"></tbody>
         </table>
-        <p class="empty" id="deviceEmpty">Filtrelerle eşleşen cihaz bulunamadı.</p>
       </div>
-      <p class="feedback" id="deviceFeedback" role="status" aria-live="polite"></p>
+      <div class="mobile-device-list" id="deviceCards" aria-label="Mobil cihaz envanteri"></div>
+      <p class="empty" id="deviceEmpty">Henüz envanter verisi yok.</p>
     </section>
 
-    <section class="panel" aria-labelledby="licenseTitle">
+    <section class="panel" id="licenses" aria-labelledby="licenseTitle" aria-busy="true" data-state="loading">
       <div class="section-head">
         <div>
           <h2 id="licenseTitle">PST kapasite tahminleri</h2>
           <p>Bu tablo yalnızca keşfedilen PST boyutlarını değerlendirir. Satın alma öncesi mailbox, archive ve atanmış SKU verileri Microsoft 365 tenantında doğrulanmalıdır.</p>
         </div>
-        <button id="refreshLicensesButton" class="secondary" type="button">Yenile</button>
+        <div class="head-actions">
+          <span class="panel-stamp" id="licensePanelStamp">Yükleniyor</span>
+          <button id="refreshLicensesButton" class="secondary" type="button">Yenile</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Kullanıcı</th><th>Toplam PST</th><th>Kapasite adayı</th><th>Güven</th><th>Doğrulama</th></tr></thead>
+          <caption class="sr-only">Kullanıcı bazında PST kapasite tahminleri</caption>
+          <thead><tr><th scope="col">Kullanıcı</th><th scope="col">Toplam PST</th><th scope="col">Kapasite adayı</th><th scope="col">Güven</th><th scope="col">Doğrulama</th></tr></thead>
           <tbody id="licenseRows"></tbody>
         </table>
         <p class="empty" id="licenseEmpty">Lisans önerisi üretilecek PST kaydı bulunamadı.</p>
@@ -280,15 +444,15 @@
       <p class="feedback" id="licenseFeedback" role="status" aria-live="polite"></p>
     </section>
 
-    <section class="panel" aria-labelledby="legacyTitle">
+    <section class="panel" id="legacy" aria-labelledby="legacyTitle" aria-busy="true" data-state="loading">
       <div class="section-head">
         <div>
           <h2 id="legacyTitle">Legacy Outlook dosyaları</h2>
           <p>Cihazdaki tüm Windows profillerinden bulunan NK2 ve N2K autocomplete artefact'leri.</p>
         </div>
-        <span class="pill">All profiles</span>
+        <span class="panel-stamp" id="legacyPanelStamp">Yükleniyor</span>
       </div>
-      <div class="toolbar">
+      <form class="toolbar" id="legacyFilterForm">
         <div class="field"><label for="legacyDevice">Cihaz</label><input id="legacyDevice" placeholder="PC-FIN-001" /></div>
         <div class="field"><label for="legacyUser">Kullanıcı / UPN</label><input id="legacyUser" placeholder="CONTOSO\kullanici" /></div>
         <div class="field"><label for="legacyProfile">Outlook profili</label><input id="legacyProfile" placeholder="Outlook" /></div>
@@ -300,13 +464,14 @@
             <option value="N2K">N2K</option>
           </select>
         </div>
-        <button id="filterLegacyButton" type="button">Filtrele</button>
-      </div>
+        <button id="filterLegacyButton" type="submit">Filtrele</button>
+      </form>
       <div class="table-wrap">
         <table>
+          <caption class="sr-only">Tüm Windows profillerinde bulunan NK2 ve N2K dosyaları</caption>
           <thead>
             <tr>
-              <th>Tip</th><th>Cihaz</th><th>Kullanıcı</th><th>SID</th><th>Profil</th><th>Dosya yolu</th><th>Boyut</th><th>Son değişiklik</th><th>Erişim</th>
+              <th scope="col">Tip</th><th scope="col">Cihaz</th><th scope="col">Kullanıcı</th><th scope="col">SID</th><th scope="col">Profil</th><th scope="col">Dosya yolu</th><th scope="col">Boyut</th><th scope="col">Son değişiklik</th><th scope="col">Erişim</th>
             </tr>
           </thead>
           <tbody id="legacyRows"></tbody>
@@ -316,16 +481,16 @@
       <p class="feedback" id="legacyFeedback" role="status" aria-live="polite"></p>
     </section>
 
-    <section class="panel" aria-labelledby="copyTitle">
+    <section class="panel" id="copy-plans" aria-labelledby="copyTitle" aria-busy="true" data-state="loading">
       <div class="section-head">
         <div>
           <h2 id="copyTitle">Migration copy planları</h2>
           <p>Keşif snapshot'ından plan üretin, hedef yolları inceleyin ve kopyalamayı ayrıca onaylayın.</p>
         </div>
-        <span class="pill">Two-stage workflow</span>
+        <span class="panel-stamp" id="copyPanelStamp">Yükleniyor</span>
       </div>
       <div class="notice">
-        Plan oluşturmak dosya kopyalamaz. Execute işlemi için AuditAdmin yetkisi ve açık onay gerekir. Servis hesabı kaynak cihazlarda <strong>ADMIN$ read</strong>, hedef share üzerinde <strong>create/write</strong> yetkisine sahip olmalıdır.
+        Plan oluşturmak dosya kopyalamaz. Kopyalamayı başlatma işlemi için AuditAdmin yetkisi ve açık onay gerekir. Servis hesabı kaynak cihazlarda <strong>ADMIN$ okuma</strong>, hedef paylaşımda <strong>oluşturma/yazma</strong> yetkisine sahip olmalıdır.
       </div>
       <form id="copyPlanForm">
         <div class="form-grid">
@@ -355,9 +520,10 @@
 
       <div class="table-wrap">
         <table>
+          <caption class="sr-only">Oluşturulan migration kopyalama planları ve çalışma durumları</caption>
           <thead>
             <tr>
-              <th>Plan</th><th>Durum</th><th>Hedef</th><th>İsteyen</th><th>Öğeler</th><th>Tamam / hata</th><th>Oluşturuldu</th><th>İşlem</th>
+              <th scope="col">Plan</th><th scope="col">Durum</th><th scope="col">Hedef</th><th scope="col">İsteyen</th><th scope="col">Öğeler</th><th scope="col">Tamam / hata</th><th scope="col">Oluşturuldu</th><th scope="col">İşlem</th>
             </tr>
           </thead>
           <tbody id="copyPlanRows"></tbody>
@@ -368,16 +534,16 @@
   </main>
 
   <dialog id="executeDialog" aria-labelledby="executeDialogTitle">
-    <h2 id="executeDialogTitle">Copy planını yürüt</h2>
-    <p>Bu işlem keşfedilen dosyaları yapılandırılmış hedef köke kopyalamaya başlayacaktır.</p>
+    <h2 id="executeDialogTitle">Kopyalama planını doğrula</h2>
+    <p>Kaynak özeti yüklendikten sonra hedefi ve dosya hacmini kontrol edin.</p>
     <div class="dialog-summary" id="executeSummary"></div>
     <label class="confirm-line">
       <input id="executeAcknowledgement" type="checkbox" />
-      Plan hedefini ve öğe sayısını kontrol ettim; kopyalama işlemini başlatmayı açıkça onaylıyorum.
+      Plan hedefini, kaynak sayısını ve toplam boyutu kontrol ettim; kopyalama işlemini başlatmayı açıkça onaylıyorum.
     </label>
     <div class="dialog-actions">
       <button id="cancelExecuteButton" class="secondary" type="button">İptal</button>
-      <button id="confirmExecuteButton" class="danger" type="button" disabled>Execute</button>
+      <button id="confirmExecuteButton" class="danger" type="button" disabled>Kopyalamayı başlat</button>
     </div>
   </dialog>
 

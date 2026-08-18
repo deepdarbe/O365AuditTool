@@ -12,11 +12,13 @@ on:
       - "scripts/Deploy-ManagementServer.ps1"
       - "scripts/Get-O365AuditDiagnostics.ps1"
       - "scripts/Install-O365AuditTool.ps1"
+      - "scripts/Invoke-ManualScan.ps1"
       - "scripts/New-O365AuditRelease.ps1"
       - "scripts/Test-O365AuditRelease.ps1"
       - "scripts/Test-O365AuditSmoke.ps1"
       - "src/O365AuditTool/**"
       - "tests/O365AuditTool.Tests/**"
+      - "tests/dashboard.test.mjs"
       - "README.md"
       - "global.json"
   pull_request:
@@ -27,6 +29,7 @@ on:
       - "scripts/**"
       - "src/O365AuditTool/**"
       - "tests/O365AuditTool.Tests/**"
+      - "tests/dashboard.test.mjs"
       - "README.md"
       - "global.json"
   workflow_dispatch:
@@ -51,6 +54,10 @@ jobs:
       - name: Test
         shell: pwsh
         run: dotnet test .\tests\O365AuditTool.Tests\O365AuditTool.Tests.csproj -c Release --no-restore
+
+      - name: Audit NuGet dependencies
+        shell: pwsh
+        run: dotnet list .\tests\O365AuditTool.Tests\O365AuditTool.Tests.csproj package --vulnerable --include-transitive --no-restore
 
       - name: Verify dotnet formatting
         shell: pwsh
@@ -107,7 +114,9 @@ jobs:
 
       - name: Verify dashboard JavaScript
         shell: pwsh
-        run: node --check .\src\O365AuditTool\wwwroot\app.js
+        run: |
+          node --check .\src\O365AuditTool\wwwroot\app.js
+          node --test .\tests\dashboard.test.mjs
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

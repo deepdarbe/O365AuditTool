@@ -37,7 +37,7 @@ Domain-member yonetim sunucusunda DNS, sertifika, servis hesabi, RBAC gruplari v
 .\Deploy-ManagementServer.ps1 -AutoConfigure
 ```
 
-`-AutoConfigure` sunucu FQDN'ini ve domain DN'ini algilar, uygun TLS sertifikasini yeniden kullanir veya AD CS `Machine` enrollment dener. Kurumsal CA kullanilamiyorsa HTTPS icin self-signed sertifika uretir. Eksik servis kimligi LocalSystem, eksik roller domain SID RID 512 ile Domain Admins, eksik tarama kapsami domain koku olur. Self-signed fallback istemci bilgisayarlara otomatik guven dagitmaz; sertifika guvenini GPO/PKI ile dagitin. Artifact copy bu modda da kapali kalir.
+`-AutoConfigure` ilk kurulumda sunucu FQDN'ini ve domain DN'ini algilar, uygun TLS sertifikasini yeniden kullanir veya AD CS `Machine` enrollment dener. Kurumsal CA kullanilamiyorsa HTTPS icin self-signed sertifika uretir. Eksik servis kimligi LocalSystem, eksik roller domain SID RID 512 ile Domain Admins, eksik tarama kapsami domain koku olur. Mevcut kurulum guncellenirken servis kimligi, port/TLS, RBAC, tarama kapsami ve copy ayarlari korunur. Self-signed fallback istemci bilgisayarlara otomatik guven dagitmaz; sertifika guvenini GPO/PKI ile dagitin.
 
 Onerilen gMSA kurulumu:
 
@@ -72,7 +72,7 @@ $auditCredential = Get-Credential 'CONTOSO\svc_o365audit'
 
 Normal modda servis kimligi belirtilmeden deployment yapilmaz. LocalSystem yalnizca `-AllowLocalSystem` veya acik `-AutoConfigure` secimiyle kullanilir.
 
-Script kendi konumundan `src\O365AuditTool` yolunu otomatik bulur, .NET 10 ve PsExec'i dogrular, uygulamayi `C:\temp\o365audit` altina staging/health-check/rollback ile kurar. TLS varsayilan olarak zorunludur; sertifika `LocalMachine\My` deposunda private key, Server Authentication EKU ve `DashboardDnsName` SAN kaydi ile bulunmalidir. Script HTTP SPN'lerini servis hesabina fail-closed olarak kaydeder/dogrular. Zamanlanmis tarama `DefaultOuFilter` veya `DefaultSiteFilter` olmadan fail-closed kalir.
+Script kendi konumundan `src\O365AuditTool` yolunu otomatik bulur, .NET 10 ve PsExec'i dogrular, uygulamayi `C:\temp\o365audit` altina staging/health-check/rollback ile kurar. PsExec korumali app dizinine kopyalanir; PsExec ve collector SHA-256 degerleri her tarama oncesi dogrulanir. TLS varsayilan olarak zorunludur; sertifika `LocalMachine\My` deposunda private key, Server Authentication EKU ve `DashboardDnsName` SAN kaydi ile bulunmalidir. Script HTTP SPN'lerini servis hesabina fail-closed olarak kaydeder/dogrular. Zamanlanmis tarama `DefaultOuFilter` veya `DefaultSiteFilter` olmadan fail-closed kalir.
 
 ## Self-contained Release ve Dogrulanmis Bootstrap
 
@@ -152,7 +152,7 @@ Servis kimligi:
 - Hedef share ve NTFS tarafinda klasor/dosya olusturma ve yazma yetkisine sahip olmalidir.
 - SHA-256 dogrulamasi kullanilacaksa ek I/O ve islem suresi planlanmalidir.
 
-Plan olusturmak kopyalamayi baslatmaz. Dashboard'da plan hedefi ve oge sayisi incelendikten sonra `AuditAdmin` tarafindan ayri bir onayla execute edilir. Deployment tekrar calistirilirken `-EnableArtifactCopy` verilmezse copy yeniden kapatilir.
+Plan olusturmak kopyalamayi baslatmaz. Dashboard'da plan hedefi, oge sayisi ve toplam kaynak boyutu incelendikten sonra `AuditAdmin` tarafindan ayri bir onayla baslatilir. Mevcut kurulum guncellenirken copy ayari korunur; kapatmak icin acik `-DisableArtifactCopy` kullanilir.
 
 ## Dashboard API
 

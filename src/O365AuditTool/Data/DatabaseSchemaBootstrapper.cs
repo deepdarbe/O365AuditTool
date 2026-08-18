@@ -5,6 +5,24 @@ namespace O365AuditTool.Data;
 
 public static class DatabaseSchemaBootstrapper
 {
+    private static readonly IReadOnlyDictionary<string, string[]> RequiredSchema =
+        new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["ScanJobs"] = ["Id", "Status", "CreatedUtc"],
+            ["Devices"] = ["Id", "ScanJobId", "DeviceName", "Status", "CollectedUtc", "CurrentLoggedOnUser"],
+            ["RetryQueue"] = ["Id", "ScanJobId", "DeviceName", "NextAttemptUtc", "Ou", "Site"],
+            ["Profiles"] = ["Id", "DeviceInventoryId", "Sid", "ProfilePath", "UserName", "Loaded", "IsDefault"],
+            ["MailAccounts"] = ["Id", "DeviceInventoryId", "Address", "IsActive"],
+            ["PstFiles"] = ["Id", "DeviceInventoryId", "Path", "SizeBytes", "ProfileName"],
+            ["LegacyFiles"] = ["Id", "DeviceInventoryId", "Sid", "ArtifactType", "Path", "SizeBytes"],
+            ["Volumes"] = ["Id", "DeviceInventoryId", "Name", "TotalBytes", "FreeBytes"],
+            ["Disks"] = ["Id", "DeviceInventoryId", "Model", "BusType"],
+            ["OfficeProducts"] = ["Id", "DeviceInventoryId", "Name", "Version", "Architecture"],
+            ["OfficeProcesses"] = ["Id", "DeviceInventoryId", "ProcessName", "Owner", "SessionId"],
+            ["ArtifactCopyJobs"] = ["Id", "TargetRoot", "Status", "CreatedUtc", "ExecutedBy", "QueuedUtc"],
+            ["ArtifactCopyItems"] = ["Id", "ArtifactCopyJobId", "SourcePath", "DestinationPath", "Status"]
+        };
+
     public static void ConfigureConcurrentAccess(AuditDbContext db)
     {
         db.Database.ExecuteSqlRaw("PRAGMA journal_mode=WAL;");
@@ -13,6 +31,12 @@ public static class DatabaseSchemaBootstrapper
 
     public static void EnsureCurrentSchema(AuditDbContext db)
     {
+        RenameTableIfNeeded(db, "StorageVolume", "Volumes");
+        RenameTableIfNeeded(db, "DiskInfo", "Disks");
+        RenameTableIfNeeded(db, "OfficeProduct", "OfficeProducts");
+        RenameTableIfNeeded(db, "OfficeProcess", "OfficeProcesses");
+        RenameTableIfNeeded(db, "MailProfile", "Profiles");
+
         db.Database.ExecuteSqlRaw(
             """
             CREATE TABLE IF NOT EXISTS "LegacyFiles" (
@@ -92,6 +116,65 @@ public static class DatabaseSchemaBootstrapper
         AddColumnIfMissing(db, "OfficeProducts", "UpdatesEnabled", "INTEGER NULL");
     }
 
+    public static void ValidateCurrentSchema(AuditDbContext db)
+    {
+        var failures = GetSchemaFailures(db);
+        if (failures.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Audit database schema is incomplete or incompatible: {string.Join("; ", failures)}");
+        }
+    }
+
+    public static IReadOnlyList<string> GetSchemaFailures(AuditDbContext db)
+    {
+        var connection = db.Database.GetDbConnection();
+        var closeConnection = connection.State != ConnectionState.Open;
+        if (closeConnection)
+        {
+            connection.Open();
+        }
+
+        try
+        {
+            var failures = new List<string>();
+            foreach (var (tableName, requiredColumns) in RequiredSchema)
+            {
+                var existingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                using var columnsCommand = connection.CreateCommand();
+                columnsCommand.CommandText = $"PRAGMA table_info(\"{tableName}\");";
+                using var reader = columnsCommand.ExecuteReader();
+                while (reader.Read())
+                {
+                    existingColumns.Add(reader.GetString(1));
+                }
+
+                if (existingColumns.Count == 0)
+                {
+                    failures.Add($"missing table {tableName}");
+                    continue;
+                }
+
+                var missingColumns = requiredColumns
+                    .Where(column => !existingColumns.Contains(column))
+                    .ToArray();
+                if (missingColumns.Length > 0)
+                {
+                    failures.Add($"{tableName} missing [{string.Join(", ", missingColumns)}]");
+                }
+            }
+
+            return failures;
+        }
+        finally
+        {
+            if (closeConnection)
+            {
+                connection.Close();
+            }
+        }
+    }
+
     private static void AddColumnIfMissing(AuditDbContext db, string tableName, string columnName, string definition)
     {
         var connection = db.Database.GetDbConnection();
@@ -127,6 +210,54 @@ public static class DatabaseSchemaBootstrapper
             using var alterCommand = connection.CreateCommand();
             alterCommand.CommandText = $"ALTER TABLE \"{tableName}\" ADD COLUMN \"{columnName}\" {definition};";
             alterCommand.ExecuteNonQuery();
+        }
+        finally
+        {
+            if (closeConnection)
+            {
+                connection.Close();
+            }
+        }
+    }
+
+    private static void RenameTableIfNeeded(AuditDbContext db, string oldName, string newName)
+    {
+        var connection = db.Database.GetDbConnection();
+        var closeConnection = connection.State != ConnectionState.Open;
+        if (closeConnection)
+        {
+            connection.Open();
+        }
+
+        try
+        {
+            using var tableCommand = connection.CreateCommand();
+            tableCommand.CommandText =
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ($oldName, $newName);";
+            var oldParameter = tableCommand.CreateParameter();
+            oldParameter.ParameterName = "$oldName";
+            oldParameter.Value = oldName;
+            tableCommand.Parameters.Add(oldParameter);
+            var newParameter = tableCommand.CreateParameter();
+            newParameter.ParameterName = "$newName";
+            newParameter.Value = newName;
+            tableCommand.Parameters.Add(newParameter);
+
+            var tables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using (var reader = tableCommand.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    tables.Add(reader.GetString(0));
+                }
+            }
+
+            if (tables.Contains(oldName) && !tables.Contains(newName))
+            {
+                using var renameCommand = connection.CreateCommand();
+                renameCommand.CommandText = $"ALTER TABLE \"{oldName}\" RENAME TO \"{newName}\";";
+                renameCommand.ExecuteNonQuery();
+            }
         }
         finally
         {

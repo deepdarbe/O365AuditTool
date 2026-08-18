@@ -8,6 +8,45 @@ namespace O365AuditTool.Tests;
 public class DatabaseSchemaBootstrapperTests
 {
     [Fact]
+    public void ValidateCurrentSchema_AcceptsCompleteModelSchema()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        connection.Open();
+        var options = new DbContextOptionsBuilder<AuditDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        using var db = new AuditDbContext(options);
+        db.Database.EnsureCreated();
+        DatabaseSchemaBootstrapper.EnsureCurrentSchema(db);
+
+        DatabaseSchemaBootstrapper.ValidateCurrentSchema(db);
+
+        Assert.Empty(DatabaseSchemaBootstrapper.GetSchemaFailures(db));
+    }
+
+    [Fact]
+    public void ValidateCurrentSchema_RejectsPartiallyCreatedDatabase()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        connection.Open();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "CREATE TABLE Devices (Id INTEGER PRIMARY KEY, DeviceName TEXT NOT NULL);";
+            command.ExecuteNonQuery();
+        }
+        var options = new DbContextOptionsBuilder<AuditDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        using var db = new AuditDbContext(options);
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            DatabaseSchemaBootstrapper.ValidateCurrentSchema(db));
+
+        Assert.Contains("missing table ScanJobs", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Devices missing", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ConfigureConcurrentAccess_EnablesWalForFileDatabase()
     {
         var databasePath = Path.Combine(Path.GetTempPath(), $"o365audit-wal-{Guid.NewGuid():N}.db");
@@ -156,6 +195,29 @@ public class DatabaseSchemaBootstrapperTests
             "INSERT INTO \"Profiles\" (\"DeviceInventoryId\", \"Sid\", \"ProfileName\") VALUES (1, 'sid', 'profile'); " +
             "SELECT \"Loaded\" FROM \"Profiles\" WHERE \"Id\" = last_insert_rowid();";
         Assert.Equal(0L, (long)insert.ExecuteScalar()!);
+    }
+
+    [Fact]
+    public void EnsureCurrentSchema_RenamesTransientConventionTableNames()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        connection.Open();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "CREATE TABLE DiskInfo (Id INTEGER PRIMARY KEY, DeviceInventoryId INTEGER NOT NULL, Model TEXT NULL);";
+            command.ExecuteNonQuery();
+        }
+        var options = new DbContextOptionsBuilder<AuditDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        using var db = new AuditDbContext(options);
+
+        DatabaseSchemaBootstrapper.EnsureCurrentSchema(db);
+
+        AssertColumns(connection, "Disks", "Id", "DeviceInventoryId", "Model", "BusType");
+        using var oldTableCommand = connection.CreateCommand();
+        oldTableCommand.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'DiskInfo';";
+        Assert.Equal(0L, (long)oldTableCommand.ExecuteScalar()!);
     }
 
     private static void AssertColumns(SqliteConnection connection, string tableName, params string[] expectedColumns)

@@ -1,0 +1,46 @@
+name: Gelistirme onerisi
+description: Audit, migration veya operasyon is akisi icin gelistirme onerisi sunun.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Ilgili alan
+      options:
+        - AD kesfi ve hedefleme
+        - Collector ve envanter
+        - Dashboard ve UX
+        - Raporlama ve export
+        - Migration copy
+        - Deployment ve operasyon
+        - Guvenlik
+        - Diger
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Cozulecek problem
+      description: Mevcut is akisinda neyin zor, riskli veya eksik oldugunu aciklayin.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Onerilen cozum
+      description: Beklenen davranisi ve operator deneyimini aciklayin.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Kabul kriterleri
+      description: Cozumun tamamlandigini gosterecek olculebilir kriterleri yazin.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Degerlendirilen alternatifler
