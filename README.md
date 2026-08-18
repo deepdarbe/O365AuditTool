@@ -31,6 +31,14 @@ C:\temp\o365audit
 `-- share
 ```
 
+Domain-member yonetim sunucusunda DNS, sertifika, servis hesabi, RBAC gruplari ve OU parametrelerini girmeden kontrollu ilk kurulum:
+
+```powershell
+.\Deploy-ManagementServer.ps1 -AutoConfigure
+```
+
+`-AutoConfigure` sunucu FQDN'ini ve domain DN'ini algilar, uygun TLS sertifikasini yeniden kullanir veya AD CS `Machine` enrollment dener. Kurumsal CA kullanilamiyorsa HTTPS icin self-signed sertifika uretir. Eksik servis kimligi LocalSystem, eksik roller domain SID RID 512 ile Domain Admins, eksik tarama kapsami domain koku olur. Self-signed fallback istemci bilgisayarlara otomatik guven dagitmaz; sertifika guvenini GPO/PKI ile dagitin. Artifact copy bu modda da kapali kalir.
+
 Onerilen gMSA kurulumu:
 
 ```powershell
@@ -62,7 +70,7 @@ $auditCredential = Get-Credential 'CONTOSO\svc_o365audit'
   -DefaultOuFilter 'OU=Workstations,DC=contoso,DC=local'
 ```
 
-Servis kimligi belirtilmeden deployment yapilmaz. LocalSystem varsayilan degildir ve ancak `-AllowLocalSystem` ile acik olarak secilebilir.
+Normal modda servis kimligi belirtilmeden deployment yapilmaz. LocalSystem yalnizca `-AllowLocalSystem` veya acik `-AutoConfigure` secimiyle kullanilir.
 
 Script kendi konumundan `src\O365AuditTool` yolunu otomatik bulur, .NET 10 ve PsExec'i dogrular, uygulamayi `C:\temp\o365audit` altina staging/health-check/rollback ile kurar. TLS varsayilan olarak zorunludur; sertifika `LocalMachine\My` deposunda private key, Server Authentication EKU ve `DashboardDnsName` SAN kaydi ile bulunmalidir. Script HTTP SPN'lerini servis hesabina fail-closed olarak kaydeder/dogrular. Zamanlanmis tarama `DefaultOuFilter` veya `DefaultSiteFilter` olmadan fail-closed kalir.
 
@@ -114,7 +122,7 @@ if ((Get-FileHash $bootstrapPath -Algorithm SHA256).Hash -ne '<BOOTSTRAP_SHA256>
 
 `-ChecksumUri` de desteklenir ancak ayni sunucudaki ZIP ve checksum birlikte degistirilebilecegi icin production'da SHA256 degerini ayri/guvenilir kanaldan `-ExpectedSha256` ile vermek daha guvenlidir.
 
-Private GitHub deposunun raw/release adresleri anonim hedef sunucular tarafindan indirilemez. Release asset'lerini authenticated proxy, internal IIS veya kurum artifact repository'sine mirror edin. PAT/token'i script, komut satiri, log veya `appsettings` icine yazmayin.
+Private GitHub deposunun raw/release adresleri anonim hedef sunucular tarafindan indirilemez. GitHub API asset URL'sini `Authorization: Bearer` header'i ve yalnizca `Contents: Read` yetkili fine-grained PAT ile kullanin veya release'i kurum artifact repository'sine mirror edin. PAT/token'i URL, script, komut satiri, log veya `appsettings` icine yazmayin; interaktif credential prompt ile process memory'de tutun.
 
 Bundle deployment modu [Deploy-ManagementServer.ps1](scripts/Deploy-ManagementServer.ps1) icin `-PublishedAppPath` ve `-CollectorPath` kullanir. Bu mod `.csproj`, `$PSScriptRoot` ve hedefte .NET SDK gerektirmez.
 

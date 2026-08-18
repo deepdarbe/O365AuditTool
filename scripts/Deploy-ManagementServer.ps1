@@ -12,6 +12,7 @@ param(
     [string]$DashboardDnsName = "",
     [string]$TlsCertificateThumbprint = "",
     [switch]$AllowInsecureHttpDashboard,
+    [switch]$AutoConfigure,
     [string]$PsExecPath = "C:\Tools\PsExec\psexec.exe",
     [string]$CollectorSharePath = "",
     [string]$CollectorShareName = "o365audit",
@@ -157,6 +158,101 @@ function Test-CertificateDnsName {
     return $prefix.Length -gt 0 -and -not $prefix.Contains('.')
 }
 
+function Get-CertificateDnsNames {
+    param([Parameter(Mandatory)]$Certificate)
+
+    $names = @()
+    if ($null -ne $Certificate.DnsNameList) {
+        $names = @($Certificate.DnsNameList | ForEach-Object { [string]$_.Unicode })
+    }
+    if ($names.Count -eq 0) {
+        $fallbackName = $Certificate.GetNameInfo(
+            [Security.Cryptography.X509Certificates.X509NameType]::DnsName,
+            $false)
+        if (-not [string]::IsNullOrWhiteSpace($fallbackName)) {
+            $names = @($fallbackName)
+        }
+    }
+
+    return @($names | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+}
+
+function Test-TlsCertificateCandidate {
+    param(
+        [Parameter(Mandatory)]$Certificate,
+        [Parameter(Mandatory)][string]$DnsName
+    )
+
+    if (-not $Certificate.HasPrivateKey) {
+        return $false
+    }
+    if ($Certificate.NotAfter.ToUniversalTime() -le [DateTime]::UtcNow) {
+        return $false
+    }
+    if ($Certificate.NotBefore.ToUniversalTime() -gt [DateTime]::UtcNow) {
+        return $false
+    }
+
+    $ekuExtension = $Certificate.Extensions |
+        Where-Object { $_.Oid.Value -eq '2.5.29.37' } |
+        Select-Object -First 1
+    if ($null -eq $ekuExtension -or -not ($ekuExtension.EnhancedKeyUsages | Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.1' })) {
+        return $false
+    }
+
+    return [bool](Get-CertificateDnsNames -Certificate $Certificate |
+        Where-Object { Test-CertificateDnsName -CertificateName $_ -RequestedName $DnsName } |
+        Select-Object -First 1)
+}
+
+function New-AutomaticTlsCertificate {
+    param([Parameter(Mandatory)][string]$DnsName)
+
+    $dnsNames = @($DnsName, $env:COMPUTERNAME) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique
+    $getCertificate = Get-Command Get-Certificate -ErrorAction SilentlyContinue
+    if ($getCertificate) {
+        try {
+            Write-Host "AD CS Machine sertifika enrollment deneniyor: $DnsName" -ForegroundColor DarkCyan
+            $enrollment = Get-Certificate `
+                -Template 'Machine' `
+                -DnsName $dnsNames `
+                -CertStoreLocation 'Cert:\LocalMachine\My' `
+                -ErrorAction Stop
+            if (
+                $null -ne $enrollment.Certificate -and
+                (Test-TlsCertificateCandidate -Certificate $enrollment.Certificate -DnsName $DnsName)
+            ) {
+                return $enrollment.Certificate
+            }
+
+            Write-Warning 'AD CS enrollment bir sertifika dondurdu ancak sertifika TLS gereksinimlerini karsilamadi.'
+        }
+        catch {
+            Write-Warning "AD CS Machine enrollment kullanilamadi: $($_.Exception.Message)"
+        }
+    }
+
+    $newSelfSignedCertificate = Get-Command New-SelfSignedCertificate -ErrorAction SilentlyContinue
+    if (-not $newSelfSignedCertificate) {
+        throw 'Otomatik TLS icin uygun sertifika bulunamadi ve New-SelfSignedCertificate kullanilamiyor.'
+    }
+
+    Write-Warning 'Kurumsal CA sertifikasi bulunamadi. HTTPS icin self-signed sertifika uretiliyor; istemci guveni GPO veya kurumsal PKI ile ayrica dagitilmalidir.'
+    return New-SelfSignedCertificate `
+        -Type SSLServerAuthentication `
+        -Subject "CN=$DnsName" `
+        -DnsName $dnsNames `
+        -CertStoreLocation 'Cert:\LocalMachine\My' `
+        -FriendlyName 'O365AuditTool automatic TLS' `
+        -KeyAlgorithm RSA `
+        -KeyLength 2048 `
+        -HashAlgorithm SHA256 `
+        -KeyExportPolicy NonExportable `
+        -NotAfter (Get-Date).AddYears(2)
+}
+
 function Remove-DeploymentDirectory {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -184,15 +280,31 @@ function Resolve-TlsCertificateThumbprint {
     param(
         [string]$Thumbprint,
         [bool]$AllowInsecure,
-        [string]$DnsName
+        [string]$DnsName,
+        [bool]$AutoConfigure
     )
 
     if ($AllowInsecure) {
         Write-Warning 'Dashboard HTTP istisnasi etkin. Bu mod yalnizca izole test aginda kullanilmalidir.'
         return ''
     }
-    if ([string]::IsNullOrWhiteSpace($Thumbprint)) {
-        throw 'Production dashboard icin -TlsCertificateThumbprint zorunludur. Yalnizca izole test icin -AllowInsecureHttpDashboard kullanilabilir.'
+    if ([string]::IsNullOrWhiteSpace($Thumbprint) -and $AutoConfigure) {
+        $certificate = Get-ChildItem -Path 'Cert:\LocalMachine\My' -ErrorAction SilentlyContinue |
+            Where-Object { Test-TlsCertificateCandidate -Certificate $_ -DnsName $DnsName } |
+            Sort-Object NotAfter -Descending |
+            Select-Object -First 1
+        if ($null -eq $certificate) {
+            $certificate = New-AutomaticTlsCertificate -DnsName $DnsName
+        }
+        if ($null -eq $certificate -or [string]::IsNullOrWhiteSpace([string]$certificate.Thumbprint)) {
+            throw "DashboardDnsName '$DnsName' icin otomatik TLS sertifikasi olusturulamadi."
+        }
+
+        $Thumbprint = [string]$certificate.Thumbprint
+        Write-Host "TLS sertifikasi otomatik secildi: $Thumbprint" -ForegroundColor DarkCyan
+    }
+    elseif ([string]::IsNullOrWhiteSpace($Thumbprint)) {
+        throw 'Production dashboard icin -TlsCertificateThumbprint zorunludur. Otomatik secim icin -AutoConfigure, yalnizca izole test icin -AllowInsecureHttpDashboard kullanilabilir.'
     }
 
     $normalized = ($Thumbprint -replace '\s', '').ToUpperInvariant()
@@ -211,25 +323,9 @@ function Resolve-TlsCertificateThumbprint {
         throw "TLS sertifikasi henuz gecerli degil: '$normalized'."
     }
 
-    $ekuExtension = $certificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | Select-Object -First 1
-    if ($null -eq $ekuExtension -or -not ($ekuExtension.EnhancedKeyUsages | Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.1' })) {
-        throw "TLS sertifikasi Server Authentication EKU icermiyor: '$normalized'."
-    }
-
-    $certificateDnsNames = @()
-    if ($null -ne $certificate.DnsNameList) {
-        $certificateDnsNames = @($certificate.DnsNameList | ForEach-Object { [string]$_.Unicode })
-    }
-    if ($certificateDnsNames.Count -eq 0) {
-        $fallbackDnsName = $certificate.GetNameInfo(
-            [Security.Cryptography.X509Certificates.X509NameType]::DnsName,
-            $false)
-        if (-not [string]::IsNullOrWhiteSpace($fallbackDnsName)) {
-            $certificateDnsNames = @($fallbackDnsName)
-        }
-    }
-    if (-not ($certificateDnsNames | Where-Object { Test-CertificateDnsName -CertificateName $_ -RequestedName $DnsName })) {
-        throw "TLS sertifikasi DashboardDnsName '$DnsName' icin uygun SAN/DNS adi icermiyor. Sertifika adlari: $($certificateDnsNames -join ', ')."
+    if (-not (Test-TlsCertificateCandidate -Certificate $certificate -DnsName $DnsName)) {
+        $certificateDnsNames = @(Get-CertificateDnsNames -Certificate $certificate)
+        throw "TLS sertifikasi private key, tarih, Server Authentication EKU veya DashboardDnsName '$DnsName' gereksinimini karsilamiyor. Sertifika adlari: $($certificateDnsNames -join ', ')."
     }
 
     return $normalized
@@ -528,6 +624,41 @@ function Remove-PublishedSampleMappings([string]$ApplicationDirectory) {
     $baseSettings | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $baseSettingsPath -Encoding utf8
 }
 
+function Get-DefaultDomainNamingContext {
+    try {
+        $rootDse = New-Object DirectoryServices.DirectoryEntry('LDAP://RootDSE')
+        $domainDn = [string]$rootDse.Properties['defaultNamingContext'].Value
+        if ([string]::IsNullOrWhiteSpace($domainDn)) {
+            throw "defaultNamingContext bos."
+        }
+
+        return $domainDn
+    }
+    catch {
+        throw "AD defaultNamingContext cozulemedi. Sunucunun domain uyeligini ve LDAP erisimini kontrol edin. $($_.Exception.Message)"
+    }
+}
+
+function Resolve-DomainRidAccount {
+    param([Parameter(Mandatory)][ValidateRange(1, 999999999)][int]$Rid)
+
+    try {
+        $domainDn = Get-DefaultDomainNamingContext
+
+        $domainEntry = New-Object DirectoryServices.DirectoryEntry("LDAP://$domainDn")
+        $domainSidBytes = [byte[]]$domainEntry.Properties['objectSid'].Value
+        $domainSid = New-Object Security.Principal.SecurityIdentifier($domainSidBytes, 0)
+        $accountSid = New-Object Security.Principal.SecurityIdentifier("$($domainSid.Value)-$Rid")
+        return @{
+            Name = $accountSid.Translate([Security.Principal.NTAccount]).Value
+            Sid = $accountSid
+        }
+    }
+    catch {
+        throw "Domain hesabi RID $Rid ile cozulemedi. Domain baglantisini kontrol edin. $($_.Exception.Message)"
+    }
+}
+
 function Resolve-DomainComputersAccount {
     param([string]$ExplicitAccount)
 
@@ -540,20 +671,7 @@ function Resolve-DomainComputersAccount {
     }
 
     try {
-        $rootDse = New-Object DirectoryServices.DirectoryEntry('LDAP://RootDSE')
-        $domainDn = [string]$rootDse.Properties['defaultNamingContext'].Value
-        if ([string]::IsNullOrWhiteSpace($domainDn)) {
-            throw "defaultNamingContext bos."
-        }
-
-        $domainEntry = New-Object DirectoryServices.DirectoryEntry("LDAP://$domainDn")
-        $domainSidBytes = [byte[]]$domainEntry.Properties['objectSid'].Value
-        $domainSid = New-Object Security.Principal.SecurityIdentifier($domainSidBytes, 0)
-        $domainComputersSid = New-Object Security.Principal.SecurityIdentifier("$($domainSid.Value)-515")
-        return @{
-            Name = $domainComputersSid.Translate([Security.Principal.NTAccount]).Value
-            Sid = $domainComputersSid
-        }
+        return Resolve-DomainRidAccount -Rid 515
     }
     catch {
         throw "Domain Computers grubu RID 515 ile cozulemedi. Domain baglantisini kontrol edin veya -DomainComputersGroup 'DOMAIN\grup' belirtin. $($_.Exception.Message)"
@@ -934,12 +1052,48 @@ if (-not $usingPublishedBundle -and -not $SkipPublish) {
 }
 Assert-PsExec -Path $PsExecPath -AllowUnsigned $AllowUnsignedPsExec.IsPresent
 
+if ($AutoConfigure) {
+    $selectedIdentityCount = @(
+        -not [string]::IsNullOrWhiteSpace($GmsaAccount)
+        $null -ne $ServiceCredential
+        $AllowLocalSystem.IsPresent
+    ).Where({ $_ }).Count
+    if ($selectedIdentityCount -eq 0) {
+        $AllowLocalSystem = $true
+        Write-Warning 'AutoConfigure servis kimligi verilmedigi icin LocalSystem sececek. Endpoint uzak yonetim yetkisi yonetim sunucusunun bilgisayar hesabina verilmelidir.'
+    }
+
+    if (
+        @($AuditAdminGroups | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -eq 0 -or
+        @($AuditReaderGroups | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -eq 0 -or
+        @($MigrationPlannerGroups | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -eq 0
+    ) {
+        $domainAdmins = Resolve-DomainRidAccount -Rid 512
+        if (@($AuditAdminGroups | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -eq 0) {
+            $AuditAdminGroups = @($domainAdmins.Name)
+        }
+        if (@($AuditReaderGroups | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -eq 0) {
+            $AuditReaderGroups = @($domainAdmins.Name)
+        }
+        if (@($MigrationPlannerGroups | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -eq 0) {
+            $MigrationPlannerGroups = @($domainAdmins.Name)
+        }
+        Write-Warning "AutoConfigure eksik RBAC rollerini '$($domainAdmins.Name)' grubuna bagladi. Kurulum sonrasi ayrik least-privilege gruplarla degistirin."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($DefaultOuFilter) -and [string]::IsNullOrWhiteSpace($DefaultSiteFilter)) {
+        $DefaultOuFilter = Get-DefaultDomainNamingContext
+        Write-Warning "AutoConfigure tarama kapsaminda domain kokunu kullanacak: '$DefaultOuFilter'. Buyuk domainlerde OU/site ile daraltin."
+    }
+}
+
 $serviceIdentity = Resolve-ServiceIdentity
 $resolvedDashboardDnsName = Resolve-DashboardDnsName -ExplicitName $DashboardDnsName
 $resolvedTlsCertificateThumbprint = Resolve-TlsCertificateThumbprint `
     -Thumbprint $TlsCertificateThumbprint `
     -AllowInsecure $AllowInsecureHttpDashboard.IsPresent `
-    -DnsName $resolvedDashboardDnsName
+    -DnsName $resolvedDashboardDnsName `
+    -AutoConfigure $AutoConfigure.IsPresent
 if (-not $AllowInsecureHttpDashboard) {
     Ensure-HttpSpns -AccountName $serviceIdentity.SpnAccount -DnsName $resolvedDashboardDnsName
     Grant-TlsPrivateKeyRead `
