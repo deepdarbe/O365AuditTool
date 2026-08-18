@@ -88,6 +88,30 @@ public class CollectorScriptTests
     }
 
     [Fact]
+    public void LocalSystemDeployment_SkipsProviderSpecificTlsKeyAclMutation()
+    {
+        var output = InvokePowerShellFunctions(
+            "scripts\\Deploy-ManagementServer.ps1",
+            "$identity=@{ Type='LocalSystem'; AclSid=(New-Object Security.Principal.SecurityIdentifier('S-1-5-18')) }; " +
+            "Ensure-TlsPrivateKeyAccess -Thumbprint ('A' * 40) -Identity $identity; 'PASS'"
+        );
+
+        Assert.Equal("PASS", output);
+    }
+
+    [Fact]
+    public void LocalSystemDeployment_RejectsMismatchedIdentitySid()
+    {
+        var output = InvokePowerShellFunctions(
+            "scripts\\Deploy-ManagementServer.ps1",
+            "$identity=@{ Type='LocalSystem'; AclSid=(New-Object Security.Principal.SecurityIdentifier('S-1-5-19')) }; " +
+            "try { Ensure-TlsPrivateKeyAccess -Thumbprint ('A' * 40) -Identity $identity; 'FAILED' } catch { 'REJECTED' }"
+        );
+
+        Assert.Equal("REJECTED", output);
+    }
+
+    [Fact]
     public void DeploymentDirectoryCreation_AppliesProtectedAcl()
     {
         var path = Path.Combine(Path.GetTempPath(), $"o365audit-acl-{Guid.NewGuid():N}");

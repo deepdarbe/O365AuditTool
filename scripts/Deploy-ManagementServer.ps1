@@ -401,6 +401,25 @@ function Grant-TlsPrivateKeyRead {
     }
 }
 
+function Ensure-TlsPrivateKeyAccess {
+    param(
+        [Parameter(Mandatory)][string]$Thumbprint,
+        [Parameter(Mandatory)][hashtable]$Identity
+    )
+
+    if ($Identity.Type -eq 'LocalSystem') {
+        if ($null -eq $Identity.AclSid -or $Identity.AclSid.Value -ne 'S-1-5-18') {
+            throw 'LocalSystem servis kimligi beklenen S-1-5-18 SID degerine sahip degil.'
+        }
+
+        # Machine certificate keys grant SYSTEM access by default; provider-specific file ACL lookup is unnecessary.
+        Write-Verbose "LocalSystem TLS private key erisimi machine-key varsayilan ACL'i ile saglanacak."
+        return
+    }
+
+    Grant-TlsPrivateKeyRead -Thumbprint $Thumbprint -AccountSid $Identity.AclSid
+}
+
 function Resolve-DotNetPath {
     param([bool]$Publishing)
 
@@ -1096,9 +1115,9 @@ $resolvedTlsCertificateThumbprint = Resolve-TlsCertificateThumbprint `
     -AutoConfigure $AutoConfigure.IsPresent
 if (-not $AllowInsecureHttpDashboard) {
     Ensure-HttpSpns -AccountName $serviceIdentity.SpnAccount -DnsName $resolvedDashboardDnsName
-    Grant-TlsPrivateKeyRead `
+    Ensure-TlsPrivateKeyAccess `
         -Thumbprint $resolvedTlsCertificateThumbprint `
-        -AccountSid $serviceIdentity.AclSid
+        -Identity $serviceIdentity
 }
 $resolvedAuditAdminGroups = @(Resolve-DomainGroupList -RoleName 'AuditAdmin' -GroupNames $AuditAdminGroups)
 $resolvedAuditReaderGroups = @(Resolve-DomainGroupList -RoleName 'AuditReader' -GroupNames $AuditReaderGroups)
