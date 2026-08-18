@@ -1,3 +1,5 @@
+using System.Data;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -5,6 +7,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using O365AuditTool.Data;
 using O365AuditTool.Models;
+
+[assembly: InternalsVisibleTo("O365AuditTool.Tests")]
 
 namespace O365AuditTool.Services;
 
@@ -19,7 +23,7 @@ public interface IArtifactCopyPlanService
 
     Task<List<ArtifactCopyJob>> ListPlansAsync(int take, CancellationToken cancellationToken);
 
-    Task<ArtifactCopyJob?> QueuePlanAsync(Guid id, CancellationToken cancellationToken);
+    Task<ArtifactCopyJob?> QueuePlanAsync(Guid id, string executedBy, CancellationToken cancellationToken);
 }
 
 public sealed class ArtifactCopyValidationException(string message) : Exception(message);
@@ -45,7 +49,10 @@ public sealed class ArtifactCopyPlanService(
         var targetRoot = string.IsNullOrWhiteSpace(request.TargetRoot)
             ? _options.DefaultTargetRoot
             : request.TargetRoot;
-        var normalizedTargetRoot = ArtifactCopyPath.NormalizeRoot(targetRoot);
+        var normalizedTargetRoot = RequireWithinLimit(
+            ArtifactCopyPath.NormalizeRoot(targetRoot),
+            1024,
+            "Target root");
         var deviceFilter = BuildFilter(request.Devices);
         var userFilter = BuildFilter(request.Users);
         var artifactTypes = NormalizeArtifactTypes(request.ArtifactTypes);
@@ -54,8 +61,9 @@ public sealed class ArtifactCopyPlanService(
             .AsNoTracking()
             .Where(x =>
                 x.Status == DeviceScanStatus.Success ||
+                x.Status == DeviceScanStatus.Partial ||
                 (x.Status == DeviceScanStatus.Error && x.RawPayloadJson != "{}"))
-            .GroupBy(x => x.DeviceName)
+            .GroupBy(x => x.DeviceName.ToUpper())
             .Select(group => group
                 .OrderByDescending(x => x.CollectedUtc)
                 .ThenByDescending(x => x.Id)
@@ -65,6 +73,7 @@ public sealed class ArtifactCopyPlanService(
 
         var snapshots = await db.Devices
             .AsNoTracking()
+            .AsSplitQuery()
             .Where(x => latestUsableIds.Contains(x.Id))
             .Include(x => x.PstFiles)
             .Include(x => x.LegacyFiles)
@@ -76,11 +85,12 @@ public sealed class ArtifactCopyPlanService(
         var job = new ArtifactCopyJob
         {
             RequestedBy = Limit(requestedBy, 128, "unknown"),
-            TargetRoot = Limit(normalizedTargetRoot, 1024),
+            TargetRoot = normalizedTargetRoot,
             Status = CopyJobStatus.Planned
         };
 
-        var sourceKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var sourceOwners = new Dictionary<string, (string UserKey, string ProfileName)>(
+            StringComparer.OrdinalIgnoreCase);
         foreach (var device in snapshots)
         {
             if (deviceFilter.Count > 0 && !deviceFilter.Contains(device.DeviceName))
@@ -100,7 +110,7 @@ public sealed class ArtifactCopyPlanService(
 
                     AddItem(
                         job,
-                        sourceKeys,
+                        sourceOwners,
                         device.DeviceName,
                         account.UserKey,
                         account.ProfileName,
@@ -119,7 +129,7 @@ public sealed class ArtifactCopyPlanService(
                 var userKey = FirstNonEmpty(
                     legacy.UserPrincipalName,
                     legacy.UserName,
-                    ResolveAccountAddress(device, legacy.Sid),
+                    ResolveAccountAddress(device, legacy.Sid, legacy.ProfileName),
                     $"SID:{legacy.Sid}");
                 var profileName = FirstNonEmpty(
                     legacy.ProfileName,
@@ -133,7 +143,7 @@ public sealed class ArtifactCopyPlanService(
 
                 AddItem(
                     job,
-                    sourceKeys,
+                    sourceOwners,
                     device.DeviceName,
                     userKey,
                     profileName,
@@ -142,6 +152,12 @@ public sealed class ArtifactCopyPlanService(
                     legacy.SizeBytes,
                     legacy.LastWriteUtc);
             }
+        }
+
+        if (job.Items.Count == 0)
+        {
+            throw new ArtifactCopyValidationException(
+                "Copy plan contains no artifacts. Adjust the device, user, or artifact type filters.");
         }
 
         job.Notes = $"SnapshotItems={job.Items.Count}; ArtifactTypes={string.Join(',', artifactTypes.Order())}";
@@ -169,9 +185,10 @@ public sealed class ArtifactCopyPlanService(
             .ToListAsync(cancellationToken);
     }
 
-    public async Task<ArtifactCopyJob?> QueuePlanAsync(Guid id, CancellationToken cancellationToken)
+    public async Task<ArtifactCopyJob?> QueuePlanAsync(Guid id, string executedBy, CancellationToken cancellationToken)
     {
         var job = await db.ArtifactCopyJobs
+            .AsNoTracking()
             .Include(x => x.Items)
             .SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
 
@@ -192,6 +209,17 @@ public sealed class ArtifactCopyPlanService(
                 $"Only Planned jobs can be queued. Current status: {job.Status}.");
         }
 
+        if (job.Items.Count == 0)
+        {
+            throw new ArtifactCopyValidationException("Empty copy plans cannot be queued.");
+        }
+
+        if (job.Items.Any(x => x.Status != CopyItemStatus.Planned))
+        {
+            throw new ArtifactCopyConflictException(
+                "Only plans whose items are all Planned can be queued.");
+        }
+
         if (!ArtifactCopyPath.TryValidateAllowedRoot(
                 job.TargetRoot,
                 _options.AllowedTargetRoots,
@@ -201,18 +229,51 @@ public sealed class ArtifactCopyPlanService(
             throw new ArtifactCopyValidationException(validationError);
         }
 
-        job.TargetRoot = Limit(normalizedTargetRoot, 1024);
-        job.Status = CopyJobStatus.Queued;
-        job.StartedUtc = null;
-        job.CompletedUtc = null;
+        normalizedTargetRoot = RequireWithinLimit(normalizedTargetRoot, 1024, "Target root");
+        var normalizedExecutedBy = RequireWithinLimit(executedBy, 128, "Executed by");
+        var queuedUtc = DateTime.UtcNow;
         foreach (var item in job.Items)
         {
-            item.Status = CopyItemStatus.Queued;
-            item.ErrorMessage = null;
+            ValidatePersistedItem(item);
         }
 
-        await db.SaveChangesAsync(cancellationToken);
-        return job;
+        await using var transaction = await db.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
+        var claimed = await db.ArtifactCopyJobs
+            .Where(x => x.Id == id && x.Status == CopyJobStatus.Planned)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(x => x.TargetRoot, normalizedTargetRoot)
+                    .SetProperty(x => x.Status, CopyJobStatus.Queued)
+                    .SetProperty(x => x.ExecutedBy, normalizedExecutedBy)
+                    .SetProperty(x => x.QueuedUtc, queuedUtc)
+                    .SetProperty(x => x.StartedUtc, (DateTime?)null)
+                    .SetProperty(x => x.CompletedUtc, (DateTime?)null),
+                cancellationToken);
+        if (claimed != 1)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw new ArtifactCopyConflictException(
+                "The copy plan was queued or changed by another request.");
+        }
+
+        var queuedItems = await db.ArtifactCopyItems
+            .Where(x => x.ArtifactCopyJobId == id && x.Status == CopyItemStatus.Planned)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(x => x.Status, CopyItemStatus.Queued)
+                    .SetProperty(x => x.ErrorMessage, (string?)null),
+                cancellationToken);
+        if (queuedItems != job.Items.Count)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw new ArtifactCopyConflictException(
+                "One or more copy items changed while the plan was being queued.");
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return await GetPlanAsync(id, cancellationToken);
     }
 
     private static HashSet<string> BuildFilter(IEnumerable<string>? values)
@@ -261,37 +322,63 @@ public sealed class ArtifactCopyPlanService(
         DeviceInventory device,
         PstFileRecord pst)
     {
-        var matchingAccount = device.MailAccounts.FirstOrDefault(x =>
-            x.Sid.Equals(pst.Sid, StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrWhiteSpace(x.Address));
+        var matchingAddress = ResolveAccountAddress(device, pst.Sid, pst.ProfileName);
         var userKey = FirstNonEmpty(
             pst.UserPrincipalName,
-            matchingAccount?.Address,
+            matchingAddress,
             $"SID:{pst.Sid}");
         var profileName = FirstNonEmpty(
-            matchingAccount?.ProfileName,
+            pst.ProfileName,
             ResolveProfileName(device, pst.Sid),
             "Default");
         return (userKey, profileName);
     }
 
-    private static string? ResolveAccountAddress(DeviceInventory device, string sid)
+    private static string? ResolveAccountAddress(
+        DeviceInventory device,
+        string sid,
+        string? profileName)
     {
-        return device.MailAccounts.FirstOrDefault(x =>
+        var sidAccounts = device.MailAccounts.Where(x =>
             x.Sid.Equals(sid, StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrWhiteSpace(x.Address))?.Address;
+            !string.IsNullOrWhiteSpace(x.Address));
+        if (!string.IsNullOrWhiteSpace(profileName))
+        {
+            var profileAddresses = sidAccounts
+                .Where(x => string.Equals(x.ProfileName, profileName, StringComparison.OrdinalIgnoreCase))
+                .Select(x => x.Address!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (profileAddresses.Length == 1)
+            {
+                return profileAddresses[0];
+            }
+            if (profileAddresses.Length > 1)
+            {
+                return null;
+            }
+        }
+
+        var addresses = sidAccounts
+            .Select(x => x.Address!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return addresses.Length == 1 ? addresses[0] : null;
     }
 
     private static string? ResolveProfileName(DeviceInventory device, string sid)
     {
-        return device.Profiles.FirstOrDefault(x =>
-            x.Sid.Equals(sid, StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrWhiteSpace(x.ProfileName))?.ProfileName;
+        var profiles = device.Profiles
+            .Where(x => x.Sid.Equals(sid, StringComparison.OrdinalIgnoreCase) &&
+                        !string.IsNullOrWhiteSpace(x.ProfileName))
+            .ToArray();
+        return profiles.FirstOrDefault(x => x.IsDefault)?.ProfileName ??
+               (profiles.Length == 1 ? profiles[0].ProfileName : null);
     }
 
-    private static void AddItem(
+    private void AddItem(
         ArtifactCopyJob job,
-        HashSet<string> sourceKeys,
+        Dictionary<string, (string UserKey, string ProfileName)> sourceOwners,
         string deviceName,
         string userKey,
         string profileName,
@@ -301,32 +388,73 @@ public sealed class ArtifactCopyPlanService(
         DateTime? sourceLastWriteUtc)
     {
         var normalizedSource = sourcePath.Trim().Trim('"').Replace('/', '\\');
+        var validatedDevice = RequireWithinLimit(deviceName, 64, "Source device");
+        var validatedSource = RequireWithinLimit(normalizedSource, 1024, "Source path");
+        ArtifactCopyPath.ToAdministrativeShare(
+            validatedDevice,
+            validatedSource,
+            artifactType,
+            _options.AllowedSourceUncRoots);
         var sourceKey = $"{deviceName}|{normalizedSource}";
-        if (!sourceKeys.Add(sourceKey))
+        if (sourceOwners.TryGetValue(sourceKey, out var existingOwner))
         {
+            if (!string.Equals(existingOwner.UserKey, userKey, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(existingOwner.ProfileName, profileName, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ArtifactCopyValidationException(
+                    $"Artifact ownership is ambiguous for '{normalizedSource}' on '{deviceName}'. " +
+                    $"It resolves to both '{existingOwner.UserKey}/{existingOwner.ProfileName}' and '{userKey}/{profileName}'. " +
+                    "Create a user-filtered plan after confirming the correct owner.");
+            }
+
             return;
         }
+        sourceOwners[sourceKey] = (userKey, profileName);
+
+        var destinationPath = RequireWithinLimit(
+            ArtifactCopyPath.BuildDestinationPath(
+                job.TargetRoot,
+                userKey,
+                validatedDevice,
+                profileName,
+                artifactType,
+                validatedSource),
+            2048,
+            "Destination path");
 
         job.Items.Add(new ArtifactCopyItem
         {
-            DeviceName = Limit(deviceName, 64),
+            DeviceName = validatedDevice,
             UserKey = Limit(userKey, 320),
             ProfileName = Limit(profileName, 256),
             ArtifactType = artifactType,
-            SourcePath = Limit(normalizedSource, 1024),
+            SourcePath = validatedSource,
             SourceSizeBytes = sourceSizeBytes,
             SourceLastWriteUtc = sourceLastWriteUtc,
-            DestinationPath = Limit(
-                ArtifactCopyPath.BuildDestinationPath(
-                    job.TargetRoot,
-                    userKey,
-                    deviceName,
-                    profileName,
-                    artifactType,
-                    normalizedSource),
-                2048),
+            DestinationPath = destinationPath,
             Status = CopyItemStatus.Planned
         });
+    }
+
+    private void ValidatePersistedItem(ArtifactCopyItem item)
+    {
+        var deviceName = RequireWithinLimit(item.DeviceName, 64, "Source device");
+        var sourcePath = RequireWithinLimit(item.SourcePath, 1024, "Source path");
+        RequireWithinLimit(item.DestinationPath, 2048, "Destination path");
+        ArtifactCopyPath.ToAdministrativeShare(
+            deviceName,
+            sourcePath,
+            item.ArtifactType,
+            _options.AllowedSourceUncRoots);
+
+        if (!ArtifactCopyPath.TryValidateAllowedRoot(
+                item.DestinationPath,
+                _options.AllowedTargetRoots,
+                out _,
+                out var destinationError))
+        {
+            throw new ArtifactCopyValidationException(destinationError);
+        }
     }
 
     private static string FirstNonEmpty(params string?[] values)
@@ -338,6 +466,23 @@ public sealed class ArtifactCopyPlanService(
     {
         var actual = string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
         return actual.Length <= maxLength ? actual : actual[..maxLength];
+    }
+
+    private static string RequireWithinLimit(string? value, int maxLength, string fieldName)
+    {
+        var actual = value?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(actual))
+        {
+            throw new ArtifactCopyValidationException($"{fieldName} is required.");
+        }
+
+        if (actual.Length > maxLength)
+        {
+            throw new ArtifactCopyValidationException(
+                $"{fieldName} exceeds the {maxLength} character limit; the value was not truncated.");
+        }
+
+        return actual;
     }
 }
 
@@ -564,7 +709,11 @@ public sealed class ArtifactCopyService(
         ArtifactCopyItem item,
         CancellationToken cancellationToken)
     {
-        var sourcePath = ArtifactCopyPath.ToAdministrativeShare(item.DeviceName, item.SourcePath);
+        var sourcePath = ArtifactCopyPath.ToAdministrativeShare(
+            item.DeviceName,
+            item.SourcePath,
+            item.ArtifactType,
+            _options.AllowedSourceUncRoots);
         if (!ArtifactCopyPath.TryValidateAllowedRoot(
                 item.DestinationPath,
                 _options.AllowedTargetRoots,
@@ -577,21 +726,22 @@ public sealed class ArtifactCopyService(
         var destinationDirectory = Path.GetDirectoryName(destinationPath)
             ?? throw new IOException($"Destination directory cannot be resolved: {destinationPath}");
         Directory.CreateDirectory(destinationDirectory);
+        ArtifactCopyPath.ValidateNoReparsePoints(destinationDirectory);
 
-        var sourceBefore = new FileInfo(sourcePath);
-        if (!sourceBefore.Exists)
+        await using var source = OpenSourceExclusive(sourcePath);
+        var sourceLength = source.Length;
+        var sourceWriteUtc = File.GetLastWriteTimeUtc(sourcePath);
+        if (sourceWriteUtc == DateTime.MinValue)
         {
             throw new FileNotFoundException("Source artifact does not exist.", sourcePath);
         }
 
-        sourceBefore.Refresh();
-        var sourceLength = sourceBefore.Length;
-        var sourceWriteUtc = sourceBefore.LastWriteTimeUtc;
         ValidateSourceAgainstSnapshot(item, sourceLength, sourceWriteUtc);
 
         if (File.Exists(destinationPath))
         {
             var existing = await VerifyExistingDestinationAsync(
+                source,
                 sourcePath,
                 sourceLength,
                 sourceWriteUtc,
@@ -612,13 +762,13 @@ public sealed class ArtifactCopyService(
         var partialPath = $"{destinationPath}.partial-{item.Id}";
         if (File.Exists(partialPath))
         {
+            ArtifactCopyPath.ValidateNoReparsePoints(partialPath);
             File.Delete(partialPath);
         }
 
         string? sourceHash = null;
         try
         {
-            await using (var source = OpenSource(sourcePath))
             await using (var destination = new FileStream(
                              partialPath,
                              FileMode.CreateNew,
@@ -646,11 +796,10 @@ public sealed class ArtifactCopyService(
                 }
 
                 await destination.FlushAsync(cancellationToken);
+                destination.Flush(flushToDisk: true);
             }
 
-            var sourceAfter = new FileInfo(sourcePath);
-            sourceAfter.Refresh();
-            EnsureSourceStable(sourceLength, sourceWriteUtc, sourceAfter);
+            EnsureOpenSourceStable(source, sourcePath, sourceLength, sourceWriteUtc);
 
             var partialInfo = new FileInfo(partialPath);
             if (partialInfo.Length != sourceLength)
@@ -668,6 +817,7 @@ public sealed class ArtifactCopyService(
                 }
             }
 
+            ArtifactCopyPath.ValidateNoReparsePoints(destinationDirectory);
             File.Move(partialPath, destinationPath, overwrite: false);
 
             var destinationInfo = new FileInfo(destinationPath);
@@ -687,50 +837,53 @@ public sealed class ArtifactCopyService(
         }
     }
 
-    private async Task<ExistingFileResult> VerifyExistingDestinationAsync(
+    internal static async Task<ExistingFileResult> VerifyExistingDestinationAsync(
+        FileStream source,
         string sourcePath,
         long sourceLength,
         DateTime sourceWriteUtc,
         string destinationPath,
         CancellationToken cancellationToken)
     {
-        var destinationInfo = new FileInfo(destinationPath);
-        if (destinationInfo.Length != sourceLength)
+        await using var destination = new FileStream(
+            destinationPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            1024 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (destination.Length != sourceLength)
         {
-            return new ExistingFileResult(false, destinationInfo.Length, null);
+            return new ExistingFileResult(false, destination.Length, null);
         }
 
-        if (!_options.VerifySha256)
-        {
-            var sourceAfterLengthCheck = new FileInfo(sourcePath);
-            sourceAfterLengthCheck.Refresh();
-            EnsureSourceStable(sourceLength, sourceWriteUtc, sourceAfterLengthCheck);
-            return new ExistingFileResult(true, destinationInfo.Length, null);
-        }
-
-        var sourceHash = await ComputeSha256Async(
-            sourcePath,
-            FileShare.ReadWrite | FileShare.Delete,
-            cancellationToken);
-        var sourceAfterHash = new FileInfo(sourcePath);
-        sourceAfterHash.Refresh();
-        EnsureSourceStable(sourceLength, sourceWriteUtc, sourceAfterHash);
-        var destinationHash = await ComputeSha256Async(destinationPath, FileShare.Read, cancellationToken);
+        var sourceHash = await ComputeSha256Async(source, cancellationToken);
+        EnsureOpenSourceStable(source, sourcePath, sourceLength, sourceWriteUtc);
+        var destinationHash = await ComputeSha256Async(destination, cancellationToken);
         return new ExistingFileResult(
             string.Equals(sourceHash, destinationHash, StringComparison.OrdinalIgnoreCase),
-            destinationInfo.Length,
+            destination.Length,
             destinationHash);
     }
 
-    private static FileStream OpenSource(string path)
+    internal static FileStream OpenSourceExclusive(string path)
     {
-        return new FileStream(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete,
-            4096,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        try
+        {
+            return new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.None,
+                4096,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+        }
+        catch (IOException ex)
+        {
+            throw new IOException(
+                $"Source artifact cannot be opened exclusively: {path}. Close Outlook before copying the PST/NK2/N2K file or copy from a VSS snapshot.",
+                ex);
+        }
     }
 
     private static async Task<string> ComputeSha256Async(
@@ -746,6 +899,16 @@ public sealed class ArtifactCopyService(
             1024 * 1024,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
         var hash = await SHA256.HashDataAsync(stream, cancellationToken);
+        return Convert.ToHexString(hash);
+    }
+
+    internal static async Task<string> ComputeSha256Async(
+        FileStream stream,
+        CancellationToken cancellationToken)
+    {
+        stream.Position = 0;
+        var hash = await SHA256.HashDataAsync(stream, cancellationToken);
+        stream.Position = 0;
         return Convert.ToHexString(hash);
     }
 
@@ -768,14 +931,14 @@ public sealed class ArtifactCopyService(
         }
     }
 
-    private static void EnsureSourceStable(
+    private static void EnsureOpenSourceStable(
+        FileStream source,
+        string sourcePath,
         long initialLength,
-        DateTime initialWriteUtc,
-        FileInfo sourceAfter)
+        DateTime initialWriteUtc)
     {
-        if (!sourceAfter.Exists ||
-            sourceAfter.Length != initialLength ||
-            sourceAfter.LastWriteTimeUtc != initialWriteUtc)
+        if (source.Length != initialLength ||
+            File.GetLastWriteTimeUtc(sourcePath) != initialWriteUtc)
         {
             throw new IOException("Source artifact changed while it was being copied.");
         }
@@ -897,7 +1060,7 @@ public sealed class ArtifactCopyService(
         long DestinationSizeBytes,
         string? Sha256);
 
-    private sealed record ExistingFileResult(
+    internal sealed record ExistingFileResult(
         bool IsSame,
         long DestinationSizeBytes,
         string? Sha256);
@@ -905,6 +1068,10 @@ public sealed class ArtifactCopyService(
 
 public static class ArtifactCopyPath
 {
+    private static readonly HashSet<string> SupportedArtifactExtensions = new(
+        [".pst", ".nk2", ".n2k"],
+        StringComparer.OrdinalIgnoreCase);
+
     private static readonly Regex HostnameOrFqdnPattern = new(
         @"\A(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*\z",
         RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
@@ -961,7 +1128,11 @@ public static class ArtifactCopyPath
             : sanitized[..maxComponentLength].TrimEnd('.', ' ');
     }
 
-    public static string ToAdministrativeShare(string deviceName, string sourcePath)
+    public static string ToAdministrativeShare(
+        string deviceName,
+        string sourcePath,
+        string? artifactType = null,
+        IEnumerable<string>? allowedUncRoots = null)
     {
         if (string.IsNullOrWhiteSpace(sourcePath))
         {
@@ -970,6 +1141,7 @@ public static class ArtifactCopyPath
 
         var normalized = sourcePath.Trim().Trim('"').Replace('/', '\\');
         ValidateNoTraversal(normalized);
+        ValidateArtifactExtension(normalized, artifactType);
         if (normalized.StartsWith(@"\\", StringComparison.Ordinal))
         {
             if (normalized.StartsWith(@"\\?\", StringComparison.Ordinal) ||
@@ -986,7 +1158,31 @@ public static class ArtifactCopyPath
                     $"UNC source path must contain a server, share, and file path: {sourcePath}");
             }
 
-            return normalized;
+            if (uncParts.Skip(2).Any(x => x.Contains(':', StringComparison.Ordinal)))
+            {
+                throw new ArtifactCopyValidationException(
+                    $"Alternate data streams are not allowed in UNC source paths: {sourcePath}");
+            }
+
+            var normalizedUnc = Path.GetFullPath(normalized);
+            var normalizedAllowedRoots = (allowedUncRoots ?? [])
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Select(NormalizeUncRoot)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (normalizedAllowedRoots.Length == 0)
+            {
+                throw new ArtifactCopyValidationException(
+                    "UNC artifact sources are disabled. Configure Copy:AllowedSourceUncRoots with trusted server/share roots.");
+            }
+
+            if (!normalizedAllowedRoots.Any(root => IsWithinRoot(normalizedUnc, root)))
+            {
+                throw new ArtifactCopyValidationException(
+                    $"UNC source is outside Copy:AllowedSourceUncRoots: {normalizedUnc}");
+            }
+
+            return normalizedUnc;
         }
 
         if (normalized.Length < 3 ||
@@ -1115,21 +1311,59 @@ public static class ArtifactCopyPath
         }
 
         var targetRootForComparison = normalizedTargetRoot;
-        var isAllowed = normalizedAllowedRoots.Any(allowedRoot =>
+        var matchedRoot = normalizedAllowedRoots.FirstOrDefault(allowedRoot =>
+            IsWithinRoot(targetRootForComparison, allowedRoot));
+        if (matchedRoot is null)
         {
-            var allowedPrefix = Path.EndsInDirectorySeparator(allowedRoot)
-                ? allowedRoot
-                : allowedRoot + Path.DirectorySeparatorChar;
-            return targetRootForComparison.Equals(allowedRoot, StringComparison.OrdinalIgnoreCase) ||
-                   targetRootForComparison.StartsWith(
-                       allowedPrefix,
-                       StringComparison.OrdinalIgnoreCase);
-        });
+            error = $"Target root is outside Copy:AllowedTargetRoots: {normalizedTargetRoot}";
+            return false;
+        }
 
-        error = isAllowed
-            ? string.Empty
-            : $"Target root is outside Copy:AllowedTargetRoots: {normalizedTargetRoot}";
-        return isAllowed;
+        try
+        {
+            ValidateNoReparsePoints(normalizedTargetRoot);
+        }
+        catch (ArtifactCopyValidationException ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+
+        error = string.Empty;
+        return true;
+    }
+
+    public static void ValidateNoReparsePoints(string path)
+    {
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(path);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new ArtifactCopyValidationException($"Path is invalid: {ex.Message}");
+        }
+
+        var pathRoot = Path.GetPathRoot(fullPath);
+        if (string.IsNullOrWhiteSpace(pathRoot))
+        {
+            throw new ArtifactCopyValidationException($"Path root cannot be resolved: {path}");
+        }
+
+        var current = pathRoot;
+        EnsureExistingPathIsNotReparsePoint(current);
+        var relativePath = fullPath[pathRoot.Length..];
+        foreach (var component in relativePath.Split(
+                     Path.DirectorySeparatorChar,
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, component);
+            if (!EnsureExistingPathIsNotReparsePoint(current))
+            {
+                break;
+            }
+        }
     }
 
     private static string SanitizeExtension(string extension)
@@ -1143,6 +1377,92 @@ public static class ArtifactCopyPath
             .Where(x => x == '.' || char.IsAsciiLetterOrDigit(x))
             .ToArray());
         return sanitized.StartsWith('.') ? sanitized : $".{sanitized}";
+    }
+
+    private static void ValidateArtifactExtension(string sourcePath, string? artifactType)
+    {
+        var extension = Path.GetExtension(sourcePath);
+        if (!SupportedArtifactExtensions.Contains(extension))
+        {
+            throw new ArtifactCopyValidationException(
+                $"Source extension must be PST, NK2, or N2K: {sourcePath}");
+        }
+
+        if (string.IsNullOrWhiteSpace(artifactType))
+        {
+            return;
+        }
+
+        var expectedExtension = $".{artifactType.Trim().TrimStart('.')}";
+        if (!SupportedArtifactExtensions.Contains(expectedExtension) ||
+            !extension.Equals(expectedExtension, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArtifactCopyValidationException(
+                $"Source extension '{extension}' does not match artifact type '{artifactType}'.");
+        }
+    }
+
+    private static string NormalizeUncRoot(string root)
+    {
+        var normalized = root.Trim().Trim('"').Replace('/', '\\');
+        ValidateNoTraversal(normalized);
+        if (!normalized.StartsWith(@"\\", StringComparison.Ordinal) ||
+            normalized.StartsWith(@"\\?\", StringComparison.Ordinal) ||
+            normalized.StartsWith(@"\\.\", StringComparison.Ordinal))
+        {
+            throw new ArtifactCopyValidationException(
+                $"Allowed UNC source root must be a standard UNC server/share path: {root}");
+        }
+
+        var parts = normalized[2..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2 || parts.Skip(2).Any(x => x.Contains(':', StringComparison.Ordinal)))
+        {
+            throw new ArtifactCopyValidationException(
+                $"Allowed UNC source root is invalid: {root}");
+        }
+
+        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(normalized));
+    }
+
+    private static bool IsWithinRoot(string candidate, string root)
+    {
+        var prefix = Path.EndsInDirectorySeparator(root)
+            ? root
+            : root + Path.DirectorySeparatorChar;
+        return candidate.Equals(root, StringComparison.OrdinalIgnoreCase) ||
+               candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool EnsureExistingPathIsNotReparsePoint(string path)
+    {
+        try
+        {
+            var attributes = File.GetAttributes(path);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new ArtifactCopyValidationException(
+                    $"Destination path contains a reparse point, junction, or symbolic link: {path}");
+            }
+
+            return true;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+        catch (ArtifactCopyValidationException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new ArtifactCopyValidationException(
+                $"Destination path cannot be safely inspected for reparse points: {path}. {ex.Message}");
+        }
     }
 
     private static void ValidateNoTraversal(string path)

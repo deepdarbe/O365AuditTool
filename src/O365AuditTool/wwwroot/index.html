@@ -193,6 +193,8 @@
         <span class="pill">Inventory</span>
       </div>
       <div class="toolbar">
+        <div class="field"><label for="fOu">OU kapsamı</label><input id="fOu" placeholder="OU=Workstations,DC=contoso,DC=local" /></div>
+        <div class="field"><label for="fSite">AD site</label><input id="fSite" placeholder="Istanbul-HQ" /></div>
         <div class="field"><label for="fDevice">Cihaz</label><input id="fDevice" placeholder="PC-FIN-001" /></div>
         <div class="field"><label for="fUser">Kullanıcı / e-posta</label><input id="fUser" placeholder="user@contoso.local" /></div>
         <div class="field">
@@ -202,9 +204,23 @@
             <option value="SATA">SATA</option>
             <option value="SSD">SSD</option>
             <option value="NVMe">NVMe</option>
+            <option value="HDD">HDD</option>
           </select>
         </div>
         <div class="field"><label for="fOfficeVersion">Office sürümü</label><input id="fOfficeVersion" placeholder="16.0" /></div>
+        <div class="field">
+          <label for="fStatus">Durum</label>
+          <select id="fStatus">
+            <option value="">Tümü</option>
+            <option value="Success">Success</option>
+            <option value="Offline">Offline</option>
+            <option value="Error">Error</option>
+            <option value="Partial">Partial</option>
+            <option value="Timeout">Timeout</option>
+          </select>
+        </div>
+        <div class="field"><label for="fPstMinGb">Min PST GB</label><input id="fPstMinGb" type="number" min="0" step="0.1" placeholder="0" /></div>
+        <div class="field"><label for="fPstMaxGb">Max PST GB</label><input id="fPstMaxGb" type="number" min="0" step="0.1" placeholder="100" /></div>
         <button id="filterDevicesButton" type="button">Filtrele</button>
         <button id="startScanButton" type="button">Tarama başlat</button>
         <button id="exportCsvButton" class="secondary" type="button">CSV</button>
@@ -214,7 +230,7 @@
         <table>
           <thead>
             <tr>
-              <th>Cihaz</th><th>Durum</th><th>Seri no</th><th>IP adresleri</th><th>Son kullanıcı</th><th>Disk</th><th>Boş GB</th><th>Office</th><th>PST GB</th><th>Toplandı</th>
+              <th>Cihaz</th><th>OU</th><th>Site</th><th>Durum</th><th>Seri no</th><th>IP adresleri</th><th>Son kullanıcı</th><th>Profiller / hesaplar</th><th>Disk</th><th>Volume boş / toplam</th><th>Office / process</th><th>PST GB</th><th>PST / Legacy detay</th><th>Tarama hatası</th><th>Veri toplandı</th>
             </tr>
           </thead>
           <tbody id="deviceRows"></tbody>
@@ -222,6 +238,24 @@
         <p class="empty" id="deviceEmpty">Filtrelerle eşleşen cihaz bulunamadı.</p>
       </div>
       <p class="feedback" id="deviceFeedback" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="panel" aria-labelledby="licenseTitle">
+      <div class="section-head">
+        <div>
+          <h2 id="licenseTitle">PST kapasite tahminleri</h2>
+          <p>Bu tablo yalnızca keşfedilen PST boyutlarını değerlendirir. Satın alma öncesi mailbox, archive ve atanmış SKU verileri Microsoft 365 tenantında doğrulanmalıdır.</p>
+        </div>
+        <button id="refreshLicensesButton" class="secondary" type="button">Yenile</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Kullanıcı</th><th>Toplam PST</th><th>Kapasite adayı</th><th>Güven</th><th>Doğrulama</th></tr></thead>
+          <tbody id="licenseRows"></tbody>
+        </table>
+        <p class="empty" id="licenseEmpty">Lisans önerisi üretilecek PST kaydı bulunamadı.</p>
+      </div>
+      <p class="feedback" id="licenseFeedback" role="status" aria-live="polite"></p>
     </section>
 
     <section class="panel" aria-labelledby="legacyTitle">

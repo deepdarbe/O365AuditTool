@@ -16,8 +16,20 @@ public class JobsController(IScanJobCoordinator coordinator, AuditDbContext dbCo
     [Authorize(Policy = "AuditAdmin")]
     public async Task<IActionResult> StartScan([FromBody] StartScanRequest request, CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(request.OuFilter) && string.IsNullOrWhiteSpace(request.SiteFilter))
+        {
+            return BadRequest(new
+            {
+                error = "An explicit OU or AD site scope is required. Domain-wide manual scans are disabled."
+            });
+        }
+
         var requestedBy = User?.Identity?.Name ?? "manual";
-        var jobId = await coordinator.EnqueueManualScanAsync(requestedBy, request.OuFilter, request.SiteFilter, cancellationToken);
+        var jobId = await coordinator.EnqueueManualScanAsync(
+            requestedBy,
+            request.OuFilter?.Trim(),
+            request.SiteFilter?.Trim(),
+            cancellationToken);
         return Accepted(new { jobId });
     }
 
@@ -47,7 +59,9 @@ public class JobsController(IScanJobCoordinator coordinator, AuditDbContext dbCo
                 total = job.Devices.Count,
                 success = job.Devices.Count(x => x.Status == DeviceScanStatus.Success),
                 offline = job.Devices.Count(x => x.Status == DeviceScanStatus.Offline),
-                error = job.Devices.Count(x => x.Status == DeviceScanStatus.Error)
+                error = job.Devices.Count(x => x.Status == DeviceScanStatus.Error),
+                partial = job.Devices.Count(x => x.Status == DeviceScanStatus.Partial),
+                timeout = job.Devices.Count(x => x.Status == DeviceScanStatus.Timeout)
             }
         });
     }

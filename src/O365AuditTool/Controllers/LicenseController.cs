@@ -6,7 +6,7 @@ namespace O365AuditTool.Controllers;
 
 [ApiController]
 [Route("api/licenses")]
-[Authorize(Policy = "MigrationPlanner")]
+[Authorize(Policy = "AuditReader")]
 public class LicenseController(IInventoryQueryService queryService) : ControllerBase
 {
     [HttpGet("recommendations")]

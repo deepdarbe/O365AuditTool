@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: nuget
+    directory: /src/O365AuditTool
+    schedule:
+      interval: weekly
+    groups:
+      microsoft-dotnet:
+        patterns:
+          - "Microsoft.*"
+          - "System.*"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: nuget
+    directory: /tests/O365AuditTool.Tests
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

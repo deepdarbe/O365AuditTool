@@ -88,7 +88,7 @@ try {
 
             $stream = $entries[$entryPath].Open()
             try {
-                $fileHash = [Convert]::ToHexString($sha256.ComputeHash($stream))
+                $fileHash = ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '')
             }
             finally {
                 $stream.Dispose()

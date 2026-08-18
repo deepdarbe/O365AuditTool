@@ -15,7 +15,9 @@ public enum DeviceScanStatus
 {
     Success,
     Offline,
-    Error
+    Error,
+    Partial,
+    Timeout
 }
 
 public enum CopyJobStatus
@@ -56,6 +58,8 @@ public class RetryQueueItem
 {
     public long Id { get; set; }
     [MaxLength(64)] public string DeviceName { get; set; } = string.Empty;
+    [MaxLength(256)] public string? Ou { get; set; }
+    [MaxLength(64)] public string? Site { get; set; }
     public Guid ScanJobId { get; set; }
     public int Attempt { get; set; }
     public DateTime NextAttemptUtc { get; set; }
@@ -70,6 +74,7 @@ public class DeviceInventory
     [MaxLength(128)] public string? SerialNumber { get; set; }
     [MaxLength(128)] public string? Os { get; set; }
     [MaxLength(128)] public string? LastLoggedOnUser { get; set; }
+    [MaxLength(128)] public string? CurrentLoggedOnUser { get; set; }
     [MaxLength(256)] public string? Ou { get; set; }
     [MaxLength(64)] public string? Site { get; set; }
     public DateTime CollectedUtc { get; set; }
@@ -104,6 +109,7 @@ public class DiskInfo
     public long DeviceInventoryId { get; set; }
     [MaxLength(256)] public string? Model { get; set; }
     [MaxLength(32)] public string? InterfaceType { get; set; }
+    [MaxLength(32)] public string? BusType { get; set; }
     [MaxLength(32)] public string? MediaType { get; set; }
     public long SizeBytes { get; set; }
 }
@@ -115,6 +121,10 @@ public class OfficeProduct
     [MaxLength(256)] public string Name { get; set; } = string.Empty;
     [MaxLength(64)] public string? Version { get; set; }
     [MaxLength(64)] public string? InstallType { get; set; }
+    [MaxLength(32)] public string? Architecture { get; set; }
+    [MaxLength(128)] public string? UpdateChannel { get; set; }
+    [MaxLength(512)] public string? ProductIds { get; set; }
+    public bool? UpdatesEnabled { get; set; }
 }
 
 public class OfficeProcess
@@ -125,6 +135,8 @@ public class OfficeProcess
     public int? Pid { get; set; }
     public DateTime? StartTimeUtc { get; set; }
     public bool IsRunning { get; set; }
+    [MaxLength(256)] public string? Owner { get; set; }
+    public int? SessionId { get; set; }
 }
 
 public class MailProfile
@@ -133,6 +145,10 @@ public class MailProfile
     public long DeviceInventoryId { get; set; }
     [MaxLength(128)] public string Sid { get; set; } = string.Empty;
     [MaxLength(256)] public string ProfileName { get; set; } = string.Empty;
+    [MaxLength(1024)] public string? ProfilePath { get; set; }
+    [MaxLength(256)] public string? UserName { get; set; }
+    public bool Loaded { get; set; }
+    public bool IsDefault { get; set; }
 }
 
 public class MailAccount
@@ -143,6 +159,7 @@ public class MailAccount
     [MaxLength(256)] public string? ProfileName { get; set; }
     [MaxLength(64)] public string AccountType { get; set; } = "Unknown";
     [MaxLength(320)] public string? Address { get; set; }
+    public bool IsActive { get; set; }
 }
 
 public class PstFileRecord
@@ -151,6 +168,7 @@ public class PstFileRecord
     public long DeviceInventoryId { get; set; }
     [MaxLength(128)] public string Sid { get; set; } = string.Empty;
     [MaxLength(320)] public string? UserPrincipalName { get; set; }
+    [MaxLength(256)] public string? ProfileName { get; set; }
     [MaxLength(1024)] public string Path { get; set; } = string.Empty;
     public long SizeBytes { get; set; }
     public bool ExistsOnDisk { get; set; }
@@ -176,8 +194,10 @@ public class ArtifactCopyJob
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     [MaxLength(128)] public string RequestedBy { get; set; } = "system";
+    [MaxLength(128)] public string? ExecutedBy { get; set; }
     [MaxLength(1024)] public string TargetRoot { get; set; } = string.Empty;
     public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
+    public DateTime? QueuedUtc { get; set; }
     public DateTime? StartedUtc { get; set; }
     public DateTime? CompletedUtc { get; set; }
     public CopyJobStatus Status { get; set; } = CopyJobStatus.Planned;

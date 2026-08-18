@@ -3,6 +3,7 @@
 const copyStatusNames = ["Planned", "Queued", "Running", "Completed", "Completed with errors", "Failed"];
 const copyItemStatusNames = ["Planned", "Queued", "Copying", "Completed", "Skipped", "Failed"];
 let selectedCopyPlan = null;
+let csrfTokenPromise = null;
 
 function byId(id) {
   return document.getElementById(id);
@@ -22,7 +23,16 @@ function getErrorMessage(error, fallback) {
 }
 
 async function fetchJson(url, options) {
-  const response = await fetch(url, options);
+  const requestOptions = options ? { ...options } : {};
+  const method = String(requestOptions.method || "GET").toUpperCase();
+  requestOptions.credentials = "same-origin";
+  if (!["GET", "HEAD", "OPTIONS", "TRACE"].includes(method)) {
+    const headers = new Headers(requestOptions.headers || {});
+    headers.set("X-O365Audit-CSRF", await getCsrfToken());
+    requestOptions.headers = headers;
+  }
+
+  const response = await fetch(url, requestOptions);
   const responseText = await response.text();
   if (!response.ok) {
     let details = "";
@@ -39,6 +49,27 @@ async function fetchJson(url, options) {
     return null;
   }
   return JSON.parse(responseText);
+}
+
+async function getCsrfToken() {
+  if (!csrfTokenPromise) {
+    csrfTokenPromise = fetch("/api/security/antiforgery", { credentials: "same-origin" })
+      .then(async response => {
+        if (!response.ok) {
+          throw new Error(`CSRF token alınamadı: HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        if (!payload?.token) {
+          throw new Error("CSRF token yanıtı geçersiz.");
+        }
+        return payload.token;
+      })
+      .catch(error => {
+        csrfTokenPromise = null;
+        throw error;
+      });
+  }
+  return csrfTokenPromise;
 }
 
 function asArray(payload) {
@@ -121,16 +152,27 @@ function splitFilterValues(value) {
 function getDeviceFilterQuery() {
   const query = new URLSearchParams();
   const filters = {
+    ou: byId("fOu").value.trim(),
+    site: byId("fSite").value.trim(),
     device: byId("fDevice").value.trim(),
     user: byId("fUser").value.trim(),
     diskType: byId("fDiskType").value,
-    officeVersion: byId("fOfficeVersion").value.trim()
+    officeVersion: byId("fOfficeVersion").value.trim(),
+    status: byId("fStatus").value
   };
   Object.entries(filters).forEach(([key, value]) => {
     if (value) {
       query.set(key, value);
     }
   });
+  const minGb = Number(byId("fPstMinGb").value);
+  const maxGb = Number(byId("fPstMaxGb").value);
+  if (Number.isFinite(minGb) && minGb >= 0 && byId("fPstMinGb").value !== "") {
+    query.set("pstMinBytes", String(Math.round(minGb * (1024 ** 3))));
+  }
+  if (Number.isFinite(maxGb) && maxGb >= 0 && byId("fPstMaxGb").value !== "") {
+    query.set("pstMaxBytes", String(Math.round(maxGb * (1024 ** 3))));
+  }
   return query;
 }
 
@@ -148,10 +190,12 @@ async function loadData() {
 
 function renderStats(data) {
   const offline = data.filter(item => Number(item.status) === 1).length;
-  const errors = data.filter(item => Number(item.status) === 2).length;
+  const errors = data.filter(item => [2, 3, 4].includes(Number(item.status))).length;
   const pstBytes = data.reduce((total, item) => total + Number(item.pstTotalBytes || 0), 0);
   const fastStorage = data.filter(item =>
-    (item.disks || []).some(disk => ["SSD", "NVME"].includes(String(disk.mediaType || "").toUpperCase()))
+    (item.disks || []).some(disk =>
+      String(disk.mediaType || "").toUpperCase() === "SSD" ||
+      String(disk.busType || "").toUpperCase() === "NVME")
   ).length;
 
   byId("statDevices").textContent = String(data.length);
@@ -167,41 +211,110 @@ function renderDeviceRows(data) {
   const deviceStatuses = {
     0: ["Success", "ok"],
     1: ["Offline", "offline"],
-    2: ["Error", "error"]
+    2: ["Error", "error"],
+    3: ["Partial", "offline"],
+    4: ["Timeout", "warning"]
   };
 
   data.forEach(device => {
     const row = document.createElement("tr");
     appendCell(row, device.deviceName || "-");
+    appendCell(row, device.ou || "-");
+    appendCell(row, device.site || "-");
     const status = deviceStatuses[Number(device.status)] || [String(device.status ?? "Unknown"), "muted"];
     appendStatusCell(row, status[0], status[1]);
     appendCell(row, device.serialNumber || "-");
     appendCell(row, formatIpAddresses(device.ipAddresses));
-    appendCell(row, device.lastLoggedOnUser || "-");
+    appendCell(
+      row,
+      device.currentLoggedOnUser
+        ? `${device.currentLoggedOnUser} (aktif)${device.lastLoggedOnUser && device.lastLoggedOnUser !== device.currentLoggedOnUser ? ` | son: ${device.lastLoggedOnUser}` : ""}`
+        : device.lastLoggedOnUser || "-");
+
+    const profileLines = (device.profiles || []).map(profile =>
+      `Profil | ${profile.userName || profile.sid || "Unknown"} | ${profile.profileName || "Windows profile"}${profile.loaded ? " | loaded" : ""}${profile.isDefault ? " | default" : ""}`);
+    const accountLines = (device.mailAccounts || []).map(account =>
+      `Hesap | ${account.address || "Unknown"} | ${account.accountType || "Unknown"} | ${account.profileName || "Default"}${account.isActive ? " | active" : ""}`);
+    const accountText = [...profileLines, ...accountLines].join("\n") || "-";
+    const accountCell = appendCell(row, accountText);
+    accountCell.style.whiteSpace = "pre-line";
 
     const diskText = (device.disks || [])
-      .map(disk => `${disk.mediaType || "-"} ${disk.model || ""}`.trim())
+      .map(disk => `${disk.mediaType || "Unknown"} | ${disk.busType || disk.interfaceType || "Unknown"} | ${disk.model || ""}`.trim())
       .join("\n") || "-";
     const diskCell = appendCell(row, diskText);
     diskCell.style.whiteSpace = "pre-line";
 
-    const freeBytes = (device.volumes || []).reduce((total, volume) => total + Number(volume.freeBytes || 0), 0);
-    appendCell(row, (freeBytes / (1024 ** 3)).toFixed(1));
-
-    const officeText = (device.officeProducts || [])
-      .map(product => `${product.name || ""} ${product.version || ""}`.trim())
-      .filter(Boolean)
+    const volumeText = (device.volumes || [])
+      .map(volume => `${volume.name || "?"} ${formatBytes(volume.freeBytes)} boş / ${formatBytes(volume.totalBytes)}`)
       .join("\n") || "-";
+    const volumeCell = appendCell(row, volumeText);
+    volumeCell.style.whiteSpace = "pre-line";
+
+    const officeProducts = (device.officeProducts || [])
+      .map(product => [
+        product.name,
+        product.version,
+        product.architecture,
+        product.productIds,
+        product.updateChannel,
+        product.updatesEnabled === false ? "updates disabled" : null
+      ].filter(Boolean).join(" | "))
+      .filter(Boolean);
+    const officeProcesses = (device.officeProcesses || [])
+      .filter(process => process.isRunning)
+      .map(process => `${process.processName || "Office"} PID ${process.pid || "?"} | ${process.owner || "owner unknown"}`);
+    const officeText = [
+      ...officeProducts.map(product => `Kurulu | ${product}`),
+      ...officeProcesses.map(process => `Çalışıyor | ${process}`)
+    ].join("\n") || "-";
     const officeCell = appendCell(row, officeText);
     officeCell.style.whiteSpace = "pre-line";
 
     appendCell(row, (Number(device.pstTotalBytes || 0) / (1024 ** 3)).toFixed(1));
+
+    const artifactText = [
+      ...(device.pstFiles || []).map(file =>
+        `PST | ${file.userPrincipalName || file.sid || "Unknown"} | ${file.profileName || "?"} | ${file.path} | ${formatBytes(file.sizeBytes)}`),
+      ...(device.legacyFiles || []).map(file =>
+        `${file.artifactType || "NK2"} | ${file.userPrincipalName || file.userName || file.sid || "Unknown"} | ${file.profileName || "?"} | ${file.path} | ${formatBytes(file.sizeBytes)}`)
+    ].join("\n") || "-";
+    const artifactCell = appendCell(row, artifactText);
+    artifactCell.style.whiteSpace = "pre-line";
+    artifactCell.style.minWidth = "360px";
+    appendCell(row, device.errorMessage || "-");
     appendCell(row, formatDate(device.collectedUtc));
     fragment.appendChild(row);
   });
 
   body.replaceChildren(fragment);
   byId("deviceEmpty").classList.toggle("visible", data.length === 0);
+}
+
+async function loadLicenseRecommendations() {
+  setFeedback("licenseFeedback", "Lisans önerileri yükleniyor...");
+  try {
+    const recommendations = asArray(await fetchJson("/api/licenses/recommendations"));
+    const body = byId("licenseRows");
+    const fragment = document.createDocumentFragment();
+    recommendations.forEach(recommendation => {
+      const row = document.createElement("tr");
+      appendCell(row, recommendation.userKey || recommendation.user || "-");
+      appendCell(row, formatBytes(recommendation.totalPstBytes));
+      appendCell(row, recommendation.recommendedLicense || "-");
+      appendStatusCell(
+        row,
+        recommendation.confidence || "Low",
+        String(recommendation.confidence).toLowerCase() === "high" ? "ok" : "warning");
+      appendCell(row, recommendation.requiresTenantValidation ? "M365 tenant verisi gerekli" : "Doğrulandı");
+      fragment.appendChild(row);
+    });
+    body.replaceChildren(fragment);
+    byId("licenseEmpty").classList.toggle("visible", recommendations.length === 0);
+    setFeedback("licenseFeedback", `${recommendations.length} kullanıcı için PST kapasite tahmini gösteriliyor; satın alma öncesi tenant doğrulaması zorunludur.`, "ok");
+  } catch (error) {
+    setFeedback("licenseFeedback", `Lisans önerileri yüklenemedi: ${getErrorMessage(error, "Bilinmeyen hata")}`, "error");
+  }
 }
 
 function getLegacyFilterQuery() {
@@ -261,10 +374,15 @@ async function startScan() {
   button.disabled = true;
   setFeedback("deviceFeedback", "Tarama kuyruğa alınıyor...");
   try {
+    const ouFilter = byId("fOu").value.trim();
+    const siteFilter = byId("fSite").value.trim();
+    if (!ouFilter && !siteFilter) {
+      throw new Error("Domain-geneli taramayı önlemek için OU veya AD site kapsamı girilmelidir.");
+    }
     const result = await fetchJson("/api/jobs/scan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ouFilter: null, siteFilter: null, manual: true })
+      body: JSON.stringify({ ouFilter: ouFilter || null, siteFilter: siteFilter || null, manual: true })
     });
     setFeedback("deviceFeedback", `Tarama kuyruğa alındı: ${result.jobId || result.id || "-"}`, "ok");
   } catch (error) {
@@ -439,6 +557,7 @@ function bindEvents() {
   byId("exportCsvButton").addEventListener("click", exportCsv);
   byId("exportPdfButton").addEventListener("click", exportPdf);
   byId("filterLegacyButton").addEventListener("click", loadLegacyFiles);
+  byId("refreshLicensesButton").addEventListener("click", loadLicenseRecommendations);
   byId("copyPlanForm").addEventListener("submit", createCopyPlan);
   byId("refreshPlansButton").addEventListener("click", loadCopyPlans);
   byId("cancelExecuteButton").addEventListener("click", closeExecuteDialog);
@@ -450,5 +569,5 @@ function bindEvents() {
 
 document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
-  void Promise.allSettled([loadData(), loadLegacyFiles(), loadCopyPlans()]);
+  void Promise.allSettled([loadData(), loadLegacyFiles(), loadLicenseRecommendations(), loadCopyPlans()]);
 });

@@ -5,12 +5,14 @@ Uygulamayi Domain Controller uzerine degil, domain uyesi ayrik bir yonetim sunuc
 ## Gereksinimler
 
 - Windows Server 2019 veya ustu, domain member.
-- Kaynaktan publish icin .NET 8 SDK; hazir publish ile kurulum icin ASP.NET Core Runtime 8.
+- Kaynaktan publish icin .NET 10 SDK. Self-contained release bundle hedefte SDK/runtime gerektirmez.
 - Microsoft Sysinternals PsExec. Script varsayilan olarak Authenticode imzasini dogrular.
 - Deployment sirasinda yerel Administrator yetkili PowerShell.
 - Onerilen servis kimligi: gMSA. Alternatif: ayri, parolasi yonetilen domain servis hesabi.
 - `ActiveDirectory` PowerShell modulu gMSA testini otomatik yapabilmek icin onerilir.
 - Artifact copy acilacaksa onceden olusturulmus bir hedef dizin/share ve servis kimligine verilmis yazma yetkisi.
+- `LocalMachine\My` deposunda dashboard DNS adini SAN olarak kapsayan, private key ve Server Authentication EKU iceren TLS server sertifikasi.
+- HTTP SPN yazabilmek icin deployment hesabinda ilgili gMSA/servis/bilgisayar hesabi uzerinde yetki veya onceden kaydedilmis SPN'ler.
 
 Script su uc kimlik seceneginden tam olarak birini zorunlu tutar:
 
@@ -36,6 +38,17 @@ Test-ADServiceAccount -Identity 'svcO365Audit'
 
 Beklenen sonuc `True` olmalidir. gMSA adi deployment komutunda sondaki `$` ile verilir.
 
+## Dashboard DNS, TLS ve Kerberos
+
+Dashboard icin tek bir kanonik FQDN belirleyin; ornek `o365audit.contoso.local`. Bu ad TLS sertifikasinin SAN alaninda bulunmalidir. Deployment su SPN'leri secilen servis kimligine `setspn -S` ile kaydeder veya mevcut kaydi dogrular:
+
+```text
+HTTP/o365audit.contoso.local
+HTTP/o365audit
+```
+
+Duplicate SPN veya yetersiz AD yetkisi varsa deployment durur. SPN'leri onceden kaydetmek icin domain yoneticisi ayni `setspn -S HTTP/o365audit.contoso.local CONTOSO\svcO365Audit$` komutunu kullanabilir. TLS kontrolu sertifikanin tarih araligini, private key'ini, Server Authentication EKU'sunu ve `-DashboardDnsName` eslesmesini dogrular.
+
 ## Endpoint Yetkileri
 
 PsExec hedef cihazda gecici servis olusturur. Servis kimligine hedef istemcilerde asagidaki yetkileri merkezi GPO ile verin:
@@ -60,6 +73,8 @@ Deployment scripti `C:\temp\o365audit\share` yolunu `\\SERVER\o365audit` olarak 
 - NTFS tarafinda SYSTEM ve yerel Administrators: Full Control; servis kimligi ve Domain Computers: Read and Execute.
 - `Everyone` ve yerel `Guests` share ACE'leri kaldirilir.
 
+`-InstallRoot` degistirilirse collector share yolu varsayilan olarak `<InstallRoot>\share` olur. ACL guvenligi nedeniyle `-CollectorSharePath` yalnizca `InstallRoot` altindaki bir dizini kabul eder.
+
 Bu izinler, endpointte baslayan collector isleminin UNC yolunu okuyabilmesi icindir. Farkli bir domain grubu kullanilacaksa `-DomainComputersGroup 'DOMAIN\GG_O365Audit_Endpoints'` verin; bu daha dar kapsamli secenektir.
 
 ## Deployment
@@ -68,27 +83,34 @@ Administrator PowerShell acin. Script kendi konumundan repo kokunu ve `src\O365A
 
 ```powershell
 Set-ExecutionPolicy RemoteSigned -Scope Process -Force
-cd C:\inetpub\CPT\scripts
+$repoRoot = 'C:\src\O365AuditTool'
+Set-Location "$repoRoot\scripts"
 
 .\Deploy-ManagementServer.ps1 `
   -GmsaAccount 'CONTOSO\svcO365Audit$' `
   -AuditAdminGroups 'CONTOSO\GG_O365_Audit_Admin' `
   -AuditReaderGroups 'CONTOSO\GG_O365_Audit_Read' `
   -MigrationPlannerGroups 'CONTOSO\GG_O365_Migration_Planner' `
-  -PsExecPath 'C:\Tools\PsExec\PsExec64.exe'
+  -PsExecPath 'C:\Tools\PsExec\PsExec64.exe' `
+  -DashboardDnsName 'o365audit.contoso.local' `
+  -TlsCertificateThumbprint '<CERT_THUMBPRINT>' `
+  -DefaultOuFilter 'OU=Workstations,DC=contoso,DC=local'
 ```
 
 Repo standart disi bir konumdaysa `-ProjectPath` belirtin:
 
 ```powershell
 .\Deploy-ManagementServer.ps1 `
-  -ProjectPath 'C:\inetpub\CPT\src\O365AuditTool' `
+  -ProjectPath 'C:\src\O365AuditTool\src\O365AuditTool' `
   -GmsaAccount 'CONTOSO\svcO365Audit$' `
   -AuditAdminGroups 'CONTOSO\GG_O365_Audit_Admin' `
   -AuditReaderGroups 'CONTOSO\GG_O365_Audit_Read' `
   -MigrationPlannerGroups 'CONTOSO\GG_O365_Migration_Planner' `
   -InstallRoot 'C:\temp\o365audit' `
-  -PsExecPath 'C:\Tools\PsExec\PsExec64.exe'
+  -PsExecPath 'C:\Tools\PsExec\PsExec64.exe' `
+  -DashboardDnsName 'o365audit.contoso.local' `
+  -TlsCertificateThumbprint '<CERT_THUMBPRINT>' `
+  -DefaultOuFilter 'OU=Workstations,DC=contoso,DC=local'
 ```
 
 Parolali domain servis hesabi alternatifi:
@@ -100,7 +122,10 @@ $auditCredential = Get-Credential 'CONTOSO\svc_o365audit'
   -AuditAdminGroups 'CONTOSO\GG_O365_Audit_Admin' `
   -AuditReaderGroups 'CONTOSO\GG_O365_Audit_Read' `
   -MigrationPlannerGroups 'CONTOSO\GG_O365_Migration_Planner' `
-  -PsExecPath 'C:\Tools\PsExec\PsExec64.exe'
+  -PsExecPath 'C:\Tools\PsExec\PsExec64.exe' `
+  -DashboardDnsName 'o365audit.contoso.local' `
+  -TlsCertificateThumbprint '<CERT_THUMBPRINT>' `
+  -DefaultOuFilter 'OU=Workstations,DC=contoso,DC=local'
 ```
 
 PSCredential parolasi `sc.exe` komut satirina yazilmaz. Yeni serviste `New-Service -Credential`, mevcut serviste yerel `Win32_Service.Change` CIM metodu kullanilir.
@@ -113,7 +138,9 @@ LocalSystem sadece kontrollu test ortami icin:
   -AuditAdminGroups 'CONTOSO\GG_O365_Audit_Admin' `
   -AuditReaderGroups 'CONTOSO\GG_O365_Audit_Read' `
   -MigrationPlannerGroups 'CONTOSO\GG_O365_Migration_Planner' `
-  -PsExecPath 'C:\Tools\PsExec\PsExec64.exe'
+  -PsExecPath 'C:\Tools\PsExec\PsExec64.exe' `
+  -TlsCertificateThumbprint '<CERT_THUMBPRINT>' `
+  -DefaultOuFilter 'OU=Workstations,DC=contoso,DC=local'
 ```
 
 `-AllowUnsignedPsExec` imza kontrolunu atlar ve yalnizca kurum tarafindan yeniden imzalanmis, hash'i ayri kanaldan dogrulanmis binary icin kullanilmalidir.
@@ -129,13 +156,14 @@ Copy ozelligi deployment'ta fail-closed ve varsayilan olarak kapalidir. Sadece i
   -AuditReaderGroups 'CONTOSO\GG_O365_Audit_Read' `
   -MigrationPlannerGroups 'CONTOSO\GG_O365_Migration_Planner' `
   -PsExecPath 'C:\Tools\PsExec\PsExec64.exe' `
+  -TlsCertificateThumbprint '<CERT_THUMBPRINT>' `
+  -DefaultOuFilter 'OU=Workstations,DC=contoso,DC=local' `
   -EnableArtifactCopy `
   -CopyTargetRoot '\\filesrv01\O365Migration' `
   -AllowedCopyTargetRoots @(
     '\\filesrv01\O365Migration',
     '\\filesrv02\O365Migration-DR'
-  ) `
-  -CopyVerifySha256
+  )
 ```
 
 Parametre davranisi:
@@ -143,7 +171,8 @@ Parametre davranisi:
 - `-EnableArtifactCopy`: Worker'in plan execute etmesine izin verir. Switch yoksa plan execution sunucu tarafinda reddedilir.
 - `-CopyTargetRoot`: Dashboard formunda hedef bos birakildiginda kullanilan varsayilan koktur.
 - `-AllowedCopyTargetRoots`: Kullanici girdisinin cikamayacagi guvenli kok listesidir. Varsayilan hedef bu koklerden birine esit veya onun altinda olmalidir.
-- `-CopyVerifySha256`: Kopya sonrasinda SHA-256 butunluk dogrulamasi acar. Buyuk PST'lerde sureyi ve storage I/O'yu artirir.
+- SHA-256 varsayilan olarak aciktir. Yalnizca acik risk kabuluyla `-DisableCopySha256` kullanilabilir; mevcut hedef dosya yine hash olmadan `Skipped` sayilmaz.
+- `-AllowedCopySourceUncRoots`: Registry'de bulunan UNC PST/NK2/N2K kaynaklari icin guvenilen server/share allowlist'idir. Liste bosken UNC kaynaklar reddedilir.
 
 `-EnableArtifactCopy` ile hedef veya allowed root bos birakilirsa deployment durur. Path tam yerel/UNC path olmali, yerel surucu koku olmamali, normalize edildikten sonra izin verilen kok sinirini asmamali ve deployment aninda mevcut/erisilebilir olmalidir.
 
@@ -164,6 +193,7 @@ Uretilen Production ayari:
     "Enabled": true,
     "DefaultTargetRoot": "\\\\filesrv01\\O365Migration",
     "AllowedTargetRoots": [ "\\\\filesrv01\\O365Migration" ],
+    "AllowedSourceUncRoots": [],
     "MaxParallelism": 2,
     "BufferSizeMb": 4,
     "VerifySha256": true,
@@ -175,9 +205,9 @@ Uretilen Production ayari:
 
 Guvenlik nedeniyle yeniden deployment'ta `-EnableArtifactCopy` verilmezse `Copy:Enabled` tekrar `false` yazilir. Onceki opt-in sessizce korunmaz.
 
-## IEX ve Self-contained Bundle Deployment
+## Dogrulanmis Self-contained Bundle Deployment
 
-`Deploy-ManagementServer.ps1` dosyasini dogrudan `IEX` ile pipe etmeyin. Kaynak modunda script `.csproj`, collector dosyasi ve fiziksel `$PSScriptRoot` bekler. Bunun yerine release bundle ve bootstrap kullanin:
+`Deploy-ManagementServer.ps1` veya bootstrap'i dogrudan `IEX` ile pipe etmeyin. Remote bootstrap once fiziksel dosyaya indirilmeli ve ayri kanaldan alinan SHA256 ile dogrulanmalidir:
 
 ```powershell
 # Build/release sunucusunda
@@ -189,10 +219,15 @@ Guvenlik nedeniyle yeniden deployment'ta `-EnableArtifactCopy` verilmezse `Copy:
 Olusan ZIP self-contained `win-x64` uygulama, collector, deployment scripti ve dosya hash manifestini icerir. Hedef sunucuda:
 
 ```powershell
-$bootstrap = Invoke-RestMethod 'https://audit.contoso.local/releases/Install-O365AuditTool.ps1'
-& ([scriptblock]::Create($bootstrap)) `
+$bootstrapPath = 'C:\temp\Install-O365AuditTool-1.0.0.ps1'
+Invoke-WebRequest 'https://audit.contoso.local/releases/Install-O365AuditTool-1.0.0.ps1' -OutFile $bootstrapPath
+if ((Get-FileHash $bootstrapPath -Algorithm SHA256).Hash -ne '<BOOTSTRAP_SHA256>') { throw 'Bootstrap hash mismatch' }
+& $bootstrapPath `
   -BundleUri 'https://audit.contoso.local/releases/O365AuditTool-1.0.0-win-x64.zip' `
   -ExpectedSha256 '<RELEASE_SHA256>' `
+  -DashboardDnsName 'o365audit.contoso.local' `
+  -TlsCertificateThumbprint '<CERT_THUMBPRINT>' `
+  -DefaultOuFilter 'OU=Workstations,DC=contoso,DC=local' `
   -GmsaAccount 'CONTOSO\svcO365Audit$' `
   -AuditAdminGroups 'CONTOSO\GG_O365_Audit_Admin' `
   -AuditReaderGroups 'CONTOSO\GG_O365_Audit_Read' `
@@ -207,7 +242,7 @@ Bootstrap kontrolleri:
 - ZIP SHA256 ve bundle icindeki dosyalar icin manifest SHA256.
 - Eksik PsExec icin yalnizca resmi `https://download.sysinternals.com/files/PSTools.zip` kaynagi.
 - `PsExec64.exe` icin gecerli Microsoft Corporation Authenticode imzasi.
-- GUID tabanli `C:\temp\o365audit-bootstrap` staging ve kontrollu cleanup.
+- Korumali ACL ile `%ProgramData%\O365AuditTool\bootstrap` altinda GUID tabanli staging, reparse-point reddi ve kontrollu cleanup.
 
 Private GitHub release asset'leri anonim indirilemez. Asset'leri internal IIS/artifact repository'ye mirror edin veya kurumsal authenticated proxy kullanin. GitHub PAT degerlerini PowerShell history, URL, log veya config dosyalarina koymayin.
 
@@ -216,6 +251,8 @@ Private GitHub release asset'leri anonim indirilemez. Asset'leri internal IIS/ar
 ## RBAC ve Fallback Hedefleri
 
 Deployment fail-closed calisir; `AuditAdmin`, `AuditReader` ve `MigrationPlanner` icin en az birer AD grubu verilmeden devam etmez. Gruplar SID'e cozulur, ActiveDirectory modulu varsa nesnelerin gercekten AD grubu oldugu da dogrulanir. Bir role birden fazla grup atanabilir:
+
+Rol hiyerarsisi `AuditAdmin > MigrationPlanner > AuditReader` seklindedir. Migration planner inventory ve planlari okuyabilir; copy execute islemi yalniz `AuditAdmin` yetkisindedir.
 
 ```powershell
 -AuditReaderGroups @(
@@ -239,14 +276,15 @@ Ayni komut tekrar calistirilabilir:
 - Mevcut servis silinmez; durdurulup binary path, kimlik ve recovery ayarlari guncellenir.
 - Mevcut SMB share ayni fiziksel yolu kullaniyorsa izinler tekrar uygulanir.
 - Ayni isimli share farkli bir path'e gidiyorsa script guvenlik nedeniyle durur.
-- Uygulama yeniden publish edilir, collector ve Production ayarlari guncellenir.
+- Uygulama staging dizinine publish edilir; servis kisa sure durdurularak dizin atomik degistirilir.
 - RBAC gruplari ve istege bagli fallback hedefleri Production override'a yeniden yazilir.
 - Copy opt-in, hedef kokler ve SHA-256 tercihi Production override'a yeniden yazilir.
+- Terminal scan kayitlari 180 gun, terminal copy job kayitlari 365 gun sonra gunluk retention islemiyle temizlenir; running/queued/planned isler silinmez.
 - Domain profilli firewall kurali olusturulur veya mevcut kural guncellenir.
-- Servis baslatildiktan sonra `http://127.0.0.1:<port>/health` endpoint'i otomatik dogrulanir.
-- Deployment hata verirse daha once calisan servis yeniden baslatilmaya calisilir.
+- Servis baslatildiktan sonra yalniz loopback'te dinleyen `http://127.0.0.1:<healthPort>/health` endpoint'i otomatik dogrulanir.
+- Deployment veya health check hata verirse onceki app dizini geri alinir ve eski servis yeniden baslatilir.
 
-Hazir publish cikisi `C:\temp\o365audit\app` altina ayri olarak kopyalandiysa `-SkipPublish` kullanilabilir. Bu durumda script DLL'i ve ASP.NET Core Runtime 8'i yine dogrular.
+`-SkipPublish` yalniz mevcut `app` dizinini staging'e kopyalayarak ayar/servis yeniden deployment'i yapar. Yeni hazir framework-dependent publish cikisi `-PublishedAppPath` ile verilir ve hedefte .NET 10 ASP.NET Core Runtime gerekir. Self-contained bundle bu gereksinimi kaldirir.
 
 ## Dogrulama
 
@@ -257,7 +295,7 @@ sc.exe qfailure O365AuditTool
 Get-SmbShareAccess o365audit
 Get-Acl C:\temp\o365audit\share | Format-List
 Test-NetConnection $env:COMPUTERNAME -Port 5080
-Invoke-RestMethod http://127.0.0.1:5080/health
+Invoke-RestMethod http://127.0.0.1:5081/health
 ```
 
 Copy ayarlarini ve hedef erisimini dogrulayin:
@@ -279,13 +317,15 @@ Get-CimInstance Win32_Service -Filter "Name='O365AuditTool'" |
 Ilk manuel tarama:
 
 ```powershell
-cd C:\inetpub\CPT
-.\scripts\Invoke-ManualScan.ps1 -BaseUrl 'http://localhost:5080'
+Set-Location $repoRoot
+.\scripts\Invoke-ManualScan.ps1 `
+  -BaseUrl 'https://audit01.contoso.local:5080' `
+  -OuFilter 'OU=Workstations,DC=contoso,DC=local'
 ```
 
 ## Sorun Giderme
 
-- `dotnet bulunamadi`: .NET 8 SDK veya ASP.NET Core Runtime 8 kurulu degildir ya da standart path disindadir.
+- `dotnet bulunamadi`: Kaynak deployment icin .NET 10 SDK veya framework-dependent servis icin ASP.NET Core Runtime 10 kurulu degildir.
 - `PsExec imzasi gecerli degil`: Resmi Sysinternals binary'sini yeniden indirin; dosya ozelliklerinden dijital imzayi kontrol edin.
 - `Test-ADServiceAccount False`: Yonetim sunucusu gMSA parolasini alma yetkisine sahip degildir veya gMSA yerel olarak kurulmamisti.
 - Servis `1069` ile acilmiyor: Domain servis hesabi parolasi/lock durumu veya `Log on as a service` GPO'su kontrol edilmelidir. Deny logon ilkeleri izinleri ezer.
@@ -297,4 +337,4 @@ cd C:\inetpub\CPT
 - Copy item `Access denied`: Servis kimliginin kaynak cihaz `ADMIN$` read ve hedef share/NTFS write izinlerini ayri ayri test edin.
 - Copy item boyut/hash hatasi: Kaynak PST halen degisiyor olabilir. Outlook kapatildiktan sonra yeni snapshot/plan olusturun; SHA-256 aciksa storage I/O ve timeout degerlerini kontrol edin.
 
-Dashboard varsayilan olarak HTTP uzerinden `5080` portunda dinler ve firewall yalnizca Domain profiline acilir. Uretimde TLS sonlandirma icin IIS/reverse proxy kullanin ve uygulama portunu yalnizca proxy veya yonetim subnetlerinden erisilebilir hale getirin.
+Dashboard varsayilan olarak HTTPS `5080` portunda dinler; TLS sertifikasi olmadan production servisi baslamaz. `-AllowInsecureHttpDashboard` yalniz izole test agi icin acik risk istisnasidir. Health endpoint'i ayri `5081` portunda yalniz loopback'te dinler ve firewall'a acilmaz.

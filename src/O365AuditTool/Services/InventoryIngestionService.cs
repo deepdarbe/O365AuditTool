@@ -7,7 +7,7 @@ namespace O365AuditTool.Services;
 public interface IInventoryIngestionService
 {
     Task<DeviceInventory> SavePayloadAsync(Guid jobId, DeviceTarget target, CollectorPayload payload, CancellationToken cancellationToken);
-    Task<DeviceInventory> SaveFailureAsync(Guid jobId, DeviceTarget target, string error, bool offline, CancellationToken cancellationToken);
+    Task<DeviceInventory> SaveFailureAsync(Guid jobId, DeviceTarget target, string error, DeviceScanStatus status, CancellationToken cancellationToken);
 }
 
 public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIngestionService
@@ -21,10 +21,11 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
             SerialNumber = payload.Device.SerialNumber,
             Os = payload.Device.Os,
             LastLoggedOnUser = payload.Device.LastLoggedOnUser,
+            CurrentLoggedOnUser = payload.Device.CurrentLoggedOnUser,
             Ou = payload.Device.Ou ?? target.Ou,
             Site = payload.Device.Site ?? target.Site,
             CollectedUtc = payload.ScanMeta.ScanTimestampUtc == default ? DateTime.UtcNow : payload.ScanMeta.ScanTimestampUtc,
-            Status = payload.Errors.Count == 0 ? DeviceScanStatus.Success : DeviceScanStatus.Error,
+            Status = payload.Errors.Count == 0 ? DeviceScanStatus.Success : DeviceScanStatus.Partial,
             ErrorMessage = payload.Errors.Count == 0 ? null : string.Join(" | ", payload.Errors),
             IpAddressesJson = JsonSerializer.Serialize(payload.Device.Ips),
             RawPayloadJson = JsonSerializer.Serialize(payload)
@@ -47,6 +48,7 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
             {
                 Model = disk.Model,
                 InterfaceType = disk.InterfaceType,
+                BusType = disk.BusType,
                 MediaType = disk.MediaType,
                 SizeBytes = disk.SizeBytes
             });
@@ -58,7 +60,11 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
             {
                 Name = product.Name,
                 Version = product.Version,
-                InstallType = product.InstallType
+                InstallType = product.InstallType,
+                Architecture = product.Architecture,
+                UpdateChannel = product.UpdateChannel,
+                ProductIds = product.ProductIds,
+                UpdatesEnabled = product.UpdatesEnabled
             });
         }
 
@@ -69,7 +75,9 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
                 ProcessName = proc.ProcessName,
                 Pid = proc.Pid,
                 StartTimeUtc = proc.StartTimeUtc,
-                IsRunning = proc.IsRunning
+                IsRunning = proc.IsRunning,
+                Owner = proc.Owner,
+                SessionId = proc.SessionId
             });
         }
 
@@ -78,7 +86,11 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
             device.Profiles.Add(new MailProfile
             {
                 Sid = profile.Sid,
-                ProfileName = profile.ProfileName
+                ProfileName = profile.ProfileName,
+                ProfilePath = profile.ProfilePath,
+                UserName = profile.UserName,
+                Loaded = profile.Loaded,
+                IsDefault = profile.IsDefault
             });
         }
 
@@ -89,7 +101,8 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
                 Sid = account.Sid,
                 ProfileName = account.ProfileName,
                 AccountType = account.AccountType,
-                Address = account.Address
+                Address = account.Address,
+                IsActive = account.IsActive
             });
         }
 
@@ -99,6 +112,7 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
             {
                 Sid = pst.Sid,
                 UserPrincipalName = pst.UserPrincipalName,
+                ProfileName = pst.ProfileName,
                 Path = pst.Path,
                 SizeBytes = pst.SizeBytes,
                 ExistsOnDisk = pst.ExistsOnDisk,
@@ -146,8 +160,13 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
         return device;
     }
 
-    public async Task<DeviceInventory> SaveFailureAsync(Guid jobId, DeviceTarget target, string error, bool offline, CancellationToken cancellationToken)
+    public async Task<DeviceInventory> SaveFailureAsync(Guid jobId, DeviceTarget target, string error, DeviceScanStatus status, CancellationToken cancellationToken)
     {
+        if (status is DeviceScanStatus.Success or DeviceScanStatus.Partial)
+        {
+            throw new ArgumentOutOfRangeException(nameof(status), status, "Failure records require Offline, Timeout, or Error status.");
+        }
+
         var device = new DeviceInventory
         {
             ScanJobId = jobId,
@@ -155,8 +174,8 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
             Ou = target.Ou,
             Site = target.Site,
             CollectedUtc = DateTime.UtcNow,
-            Status = offline ? DeviceScanStatus.Offline : DeviceScanStatus.Error,
-            ErrorMessage = error,
+            Status = status,
+            ErrorMessage = Truncate(error, 4096),
             IpAddressesJson = "[]",
             RawPayloadJson = "{}"
         };
@@ -165,4 +184,7 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
         await dbContext.SaveChangesAsync(cancellationToken);
         return device;
     }
+
+    private static string Truncate(string value, int maxLength) =>
+        value.Length <= maxLength ? value : value[..maxLength];
 }

@@ -57,7 +57,8 @@ public sealed class CopyController(IArtifactCopyPlanService copyPlanService) : C
     {
         try
         {
-            var job = await copyPlanService.QueuePlanAsync(id, cancellationToken);
+            var executedBy = User?.Identity?.Name ?? "unknown";
+            var job = await copyPlanService.QueuePlanAsync(id, executedBy, cancellationToken);
             return job is null
                 ? NotFound()
                 : AcceptedAtAction(nameof(GetPlan), new { id = job.Id }, BuildResponse(job));
@@ -82,9 +83,11 @@ public sealed class CopyController(IArtifactCopyPlanService copyPlanService) : C
         {
             job.Id,
             job.RequestedBy,
+            job.ExecutedBy,
             job.TargetRoot,
             job.CreatedUtc,
             job.StartedUtc,
+            job.QueuedUtc,
             job.CompletedUtc,
             job.Status,
             job.Notes,
@@ -129,9 +132,11 @@ public sealed class CopyController(IArtifactCopyPlanService copyPlanService) : C
         {
             job.Id,
             job.RequestedBy,
+            job.ExecutedBy,
             job.TargetRoot,
             job.CreatedUtc,
             job.StartedUtc,
+            job.QueuedUtc,
             job.CompletedUtc,
             job.Status,
             job.Notes,

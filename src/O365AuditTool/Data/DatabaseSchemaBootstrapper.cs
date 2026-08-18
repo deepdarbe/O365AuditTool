@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using System.Data;
 
 namespace O365AuditTool.Data;
 
@@ -29,9 +30,11 @@ public static class DatabaseSchemaBootstrapper
             CREATE TABLE IF NOT EXISTS "ArtifactCopyJobs" (
                 "Id" TEXT NOT NULL CONSTRAINT "PK_ArtifactCopyJobs" PRIMARY KEY,
                 "RequestedBy" TEXT NOT NULL,
+                "ExecutedBy" TEXT NULL,
                 "TargetRoot" TEXT NOT NULL,
                 "CreatedUtc" TEXT NOT NULL,
                 "StartedUtc" TEXT NULL,
+                "QueuedUtc" TEXT NULL,
                 "CompletedUtc" TEXT NULL,
                 "Status" INTEGER NOT NULL,
                 "Notes" TEXT NULL
@@ -62,5 +65,69 @@ public static class DatabaseSchemaBootstrapper
             CREATE INDEX IF NOT EXISTS "IX_ArtifactCopyItems_ArtifactCopyJobId_Status"
                 ON "ArtifactCopyItems" ("ArtifactCopyJobId", "Status");
             """);
+
+        AddColumnIfMissing(db, "Profiles", "ProfilePath", "TEXT NULL");
+        AddColumnIfMissing(db, "Profiles", "UserName", "TEXT NULL");
+        AddColumnIfMissing(db, "Profiles", "Loaded", "INTEGER NOT NULL DEFAULT 0");
+        AddColumnIfMissing(db, "Profiles", "IsDefault", "INTEGER NOT NULL DEFAULT 0");
+        AddColumnIfMissing(db, "PstFiles", "ProfileName", "TEXT NULL");
+        AddColumnIfMissing(db, "OfficeProcesses", "Owner", "TEXT NULL");
+        AddColumnIfMissing(db, "OfficeProcesses", "SessionId", "INTEGER NULL");
+        AddColumnIfMissing(db, "MailAccounts", "IsActive", "INTEGER NOT NULL DEFAULT 0");
+        AddColumnIfMissing(db, "ArtifactCopyJobs", "ExecutedBy", "TEXT NULL");
+        AddColumnIfMissing(db, "ArtifactCopyJobs", "QueuedUtc", "TEXT NULL");
+        AddColumnIfMissing(db, "RetryQueue", "Ou", "TEXT NULL");
+        AddColumnIfMissing(db, "RetryQueue", "Site", "TEXT NULL");
+        AddColumnIfMissing(db, "Devices", "CurrentLoggedOnUser", "TEXT NULL");
+        AddColumnIfMissing(db, "Disks", "BusType", "TEXT NULL");
+        AddColumnIfMissing(db, "OfficeProducts", "Architecture", "TEXT NULL");
+        AddColumnIfMissing(db, "OfficeProducts", "UpdateChannel", "TEXT NULL");
+        AddColumnIfMissing(db, "OfficeProducts", "ProductIds", "TEXT NULL");
+        AddColumnIfMissing(db, "OfficeProducts", "UpdatesEnabled", "INTEGER NULL");
+    }
+
+    private static void AddColumnIfMissing(AuditDbContext db, string tableName, string columnName, string definition)
+    {
+        var connection = db.Database.GetDbConnection();
+        var closeConnection = connection.State != ConnectionState.Open;
+        if (closeConnection)
+        {
+            connection.Open();
+        }
+
+        try
+        {
+            using var columnsCommand = connection.CreateCommand();
+            columnsCommand.CommandText = $"PRAGMA table_info(\"{tableName}\");";
+
+            var tableExists = false;
+            using (var reader = columnsCommand.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    tableExists = true;
+                    if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return;
+                    }
+                }
+            }
+
+            if (!tableExists)
+            {
+                return;
+            }
+
+            using var alterCommand = connection.CreateCommand();
+            alterCommand.CommandText = $"ALTER TABLE \"{tableName}\" ADD COLUMN \"{columnName}\" {definition};";
+            alterCommand.ExecuteNonQuery();
+        }
+        finally
+        {
+            if (closeConnection)
+            {
+                connection.Close();
+            }
+        }
     }
 }

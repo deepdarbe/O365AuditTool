@@ -13,9 +13,11 @@ on:
       - "scripts/Install-O365AuditTool.ps1"
       - "scripts/New-O365AuditRelease.ps1"
       - "scripts/Test-O365AuditRelease.ps1"
+      - "scripts/Test-O365AuditSmoke.ps1"
       - "src/O365AuditTool/**"
       - "tests/O365AuditTool.Tests/**"
       - "README.md"
+      - "global.json"
   pull_request:
     paths:
       - ".github/workflows/o365audit-ci.yml"
@@ -25,6 +27,7 @@ on:
       - "src/O365AuditTool/**"
       - "tests/O365AuditTool.Tests/**"
       - "README.md"
+      - "global.json"
   workflow_dispatch:
 
 permissions:
@@ -34,19 +37,23 @@ jobs:
   test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-dotnet@v6
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 10.0.x
 
       - name: Restore
         shell: pwsh
-        run: dotnet restore .\tests\O365AuditTool.Tests\O365AuditTool.Tests.csproj
+        run: dotnet restore .\tests\O365AuditTool.Tests\O365AuditTool.Tests.csproj '-warnaserror:NU1901;NU1902;NU1903;NU1904'
 
       - name: Test
         shell: pwsh
         run: dotnet test .\tests\O365AuditTool.Tests\O365AuditTool.Tests.csproj -c Release --no-restore
+
+      - name: Verify dotnet formatting
+        shell: pwsh
+        run: dotnet format .\tests\O365AuditTool.Tests\O365AuditTool.Tests.csproj --verify-no-changes --no-restore
 
       - name: Verify PowerShell syntax
         shell: pwsh
@@ -55,8 +62,10 @@ jobs:
             '.\scripts\collector.ps1',
             '.\scripts\Deploy-ManagementServer.ps1',
             '.\scripts\Install-O365AuditTool.ps1',
+            '.\scripts\Invoke-ManualScan.ps1',
             '.\scripts\New-O365AuditRelease.ps1',
-            '.\scripts\Test-O365AuditRelease.ps1'
+            '.\scripts\Test-O365AuditRelease.ps1',
+            '.\scripts\Test-O365AuditSmoke.ps1'
           )
           foreach ($file in $files) {
             $tokens = $null
@@ -72,6 +81,27 @@ jobs:
             }
           }
 
+      - name: Analyze PowerShell
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Repository PSGallery -Force
+          $files = @(
+            '.\scripts\collector.ps1',
+            '.\scripts\Deploy-ManagementServer.ps1',
+            '.\scripts\Install-O365AuditTool.ps1',
+            '.\scripts\Invoke-ManualScan.ps1',
+            '.\scripts\New-O365AuditRelease.ps1',
+            '.\scripts\Test-O365AuditRelease.ps1',
+            '.\scripts\Test-O365AuditSmoke.ps1'
+          )
+          $findings = foreach ($file in $files) {
+            Invoke-ScriptAnalyzer -Path $file -Severity Error
+          }
+          if ($findings) {
+            $findings | Format-Table -AutoSize | Out-String | Write-Error
+            exit 1
+          }
+
       - name: Verify dashboard JavaScript
         shell: pwsh
         run: node --check .\src\O365AuditTool\wwwroot\app.js
@@ -83,13 +113,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-dotnet@v6
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 10.0.x
 
       - name: Build self-contained release
         shell: pwsh
@@ -103,6 +133,13 @@ jobs:
           $archive = Get-ChildItem .\dist\O365AuditTool-*.zip | Select-Object -First 1
           .\scripts\Test-O365AuditRelease.ps1 -ArchivePath $archive.FullName
 
+      - name: Smoke test published application
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem .\dist\O365AuditTool-*.zip | Select-Object -First 1
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath .\dist\smoke
+          .\scripts\Test-O365AuditSmoke.ps1 -AppDirectory .\dist\smoke\app
+
       - name: Publish private GitHub release
         shell: pwsh
         env:
@@ -111,6 +148,7 @@ jobs:
           gh release create $env:GITHUB_REF_NAME `
             .\dist\O365AuditTool-*.zip `
             .\dist\O365AuditTool-*.zip.sha256 `
-            .\scripts\Install-O365AuditTool.ps1 `
+            .\dist\Install-O365AuditTool-*.ps1 `
+            .\dist\Install-O365AuditTool-*.ps1.sha256 `
             --title "O365AuditTool $env:GITHUB_REF_NAME" `
             --generate-notes
