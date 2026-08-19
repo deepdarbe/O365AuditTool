@@ -50,4 +50,6 @@ test("dashboard keeps safe API and mutation behavior", () => {
   assert.doesNotMatch(app, /details\s*=\s*responseText/, "raw server responses must not be shown to users");
   assert.match(app, /\/api\/directory\/structure/);
   assert.match(app, /\/api\/jobs\/\$\{encodeURIComponent\(jobId\)\}/);
+  assert.match(app, /Tarama erişimi sınırlı/);
+  assert.match(app, /cihaz başarıyla toplandı/);
 });

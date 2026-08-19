@@ -105,6 +105,7 @@
     .value { margin-top: 5px; font-family: Georgia, serif; font-size: 28px; font-weight: 700; }
     .panel { margin-top: 18px; padding: 18px; }
     .panel[data-state="loading"] { border-top-color: var(--accent); }
+    .panel[data-state="warning"] { border-color: #d9a24f; }
     .panel[data-state="stale"] { border-color: #d9a24f; }
     .panel[data-state="error"] { border-color: #d98f92; }
     .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 13px; }
@@ -155,6 +156,8 @@
     .readiness-list li::before { content: "○"; margin-right: 6px; }
     .readiness-list li[data-state="ok"] { background: #e8f5f1; color: var(--accent-strong); }
     .readiness-list li[data-state="ok"]::before { content: "✓"; }
+    .readiness-list li[data-state="warning"] { background: var(--warn-soft); color: var(--warn); }
+    .readiness-list li[data-state="warning"]::before { content: "!"; }
     .readiness-list li[data-state="error"] { background: var(--error-soft); color: var(--error); }
     .readiness-list li[data-state="error"]::before { content: "!"; }
     .readiness-link { color: var(--accent-strong); font-size: 12px; font-weight: 800; white-space: nowrap; }

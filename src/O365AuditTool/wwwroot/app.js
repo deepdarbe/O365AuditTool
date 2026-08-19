@@ -45,8 +45,8 @@ function setPanelState(panelId, stampId, state, message) {
   panel.dataset.state = state;
   panel.setAttribute("aria-busy", state === "loading" ? "true" : "false");
   stamp.textContent = message;
-  stamp.className = `panel-stamp ${state === "success" || state === "empty" ? "ok" : state === "loading" ? "" : state === "stale" ? "warning" : "error"}`;
-  if (state === "success" || state === "empty") {
+  stamp.className = `panel-stamp ${state === "success" || state === "empty" ? "ok" : state === "loading" ? "" : state === "stale" || state === "warning" ? "warning" : "error"}`;
+  if (state === "success" || state === "empty" || state === "warning") {
     panelLastUpdated.set(panelId, new Date());
   }
 }
@@ -68,6 +68,9 @@ function updateReadinessSummary() {
   if (states.includes("error")) {
     byId("readinessTitle").textContent = "Operatör müdahalesi gerekiyor";
     byId("readinessSummary").textContent = "Hatalı adımı düzeltin ve ilgili yenileme işlemini yeniden çalıştırın.";
+  } else if (states.includes("warning")) {
+    byId("readinessTitle").textContent = "Tarama erişimi sınırlı";
+    byId("readinessSummary").textContent = "Çevrimdışı veya hatalı cihazlar tamamlanmadan migration envanteri güvenilir kabul edilmemelidir.";
   } else if (states.every(state => state === "ok")) {
     byId("readinessTitle").textContent = "Audit görünümü hazır";
     byId("readinessSummary").textContent = "AD kapsamı seçilebilir ve güncel envanter sonuçları raporlanabilir.";
@@ -410,15 +413,29 @@ async function loadData() {
   try {
     const query = getDeviceFilterQuery();
     const data = asArray(await fetchJson(`/api/inventory/devices?${query}`));
-    renderStats(data);
+    const stats = renderStats(data);
     renderDeviceRows(data, query.size > 0);
-    const stamp = `Güncel · ${new Date().toLocaleTimeString("tr-TR")}`;
-    setPanelState("inventory", "devicePanelStamp", data.length ? "success" : "empty", stamp);
-    setFeedback("deviceFeedback", `${data.length} cihaz gösteriliyor.`, "ok");
+    const updatedTime = new Date().toLocaleTimeString("tr-TR");
+    const stamp = `Güncel · ${updatedTime}`;
+    const degraded = data.length > 0 && (stats.offline > 0 || stats.errors > 0);
+    const inventoryState = stats.success === 0 && data.length > 0
+      ? "error"
+      : degraded
+        ? "warning"
+        : data.length
+          ? "success"
+          : "empty";
+    setPanelState("inventory", "devicePanelStamp", inventoryState, degraded ? `Erişim sınırlı · ${updatedTime}` : stamp);
+    setFeedback(
+      "deviceFeedback",
+      data.length
+        ? `${data.length} cihaz gösteriliyor: ${stats.success} başarılı, ${stats.offline} çevrimdışı, ${stats.errors} hata/kısmi.`
+        : "Henüz cihaz envanteri yok.",
+      degraded ? "warning" : "ok");
     setReadiness(
       "readinessInventory",
-      data.length ? "ok" : "pending",
-      data.length ? `${data.length} cihaz raporlandı` : "İlk tarama bekleniyor");
+      stats.success === 0 && data.length > 0 ? "error" : degraded ? "warning" : data.length ? "ok" : "pending",
+      data.length ? `${stats.success}/${data.length} cihaz başarıyla toplandı` : "İlk tarama bekleniyor");
   } catch (error) {
     const state = hadData ? "stale" : "error";
     setPanelState("inventory", "devicePanelStamp", state, getStaleMessage("inventory"));
@@ -434,6 +451,7 @@ async function loadData() {
 }
 
 function renderStats(data) {
+  const success = data.filter(item => Number(item.status) === 0).length;
   const offline = data.filter(item => Number(item.status) === 1).length;
   const errors = data.filter(item => [2, 3, 4].includes(Number(item.status))).length;
   const pstBytes = data.reduce((total, item) => total + Number(item.pstTotalBytes || 0), 0);
@@ -448,6 +466,7 @@ function renderStats(data) {
   byId("statErrors").textContent = String(errors);
   byId("statPst").textContent = (pstBytes / (1024 ** 3)).toFixed(1);
   byId("statStorage").textContent = String(fastStorage);
+  return { success, offline, errors };
 }
 
 function appendMobileDefinition(list, label, value) {
