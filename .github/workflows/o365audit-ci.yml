@@ -157,10 +157,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME `
-            .\dist\O365AuditTool-*.zip `
-            .\dist\O365AuditTool-*.zip.sha256 `
-            .\dist\Install-O365AuditTool-*.ps1 `
-            .\dist\Install-O365AuditTool-*.ps1.sha256 `
-            --title "O365AuditTool $env:GITHUB_REF_NAME" `
-            --generate-notes
+          $tag = $env:GITHUB_REF_NAME
+          $assets = @(
+            (Get-ChildItem .\dist\O365AuditTool-*.zip).FullName
+            (Get-ChildItem .\dist\O365AuditTool-*.zip.sha256).FullName
+            (Get-ChildItem .\dist\Install-O365AuditTool-*.ps1).FullName
+            (Get-ChildItem .\dist\Install-O365AuditTool-*.ps1.sha256).FullName
+          )
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            # Release already exists (e.g. created from the GitHub web UI); attach/refresh assets.
+            gh release upload $tag @assets --clobber
+          } else {
+            gh release create $tag @assets --title "O365AuditTool $tag" --generate-notes
+          }
