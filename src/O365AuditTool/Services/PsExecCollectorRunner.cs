@@ -142,13 +142,33 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
             var json = ExtractJsonObject(stdout);
             if (string.IsNullOrWhiteSpace(json))
             {
-                return new CollectResult(false, null, "Collector output did not contain JSON payload.", false);
+                // PsExec succeeded but the collector produced no payload. Keep what it did
+                // write: without it the operator only sees "no JSON" and cannot tell a
+                // collector crash from an execution-policy block or an empty run.
+                return new CollectResult(
+                    false,
+                    null,
+                    $"Collector output did not contain JSON payload. {ComposeFailureDetail(stdout, stderr)}",
+                    false);
             }
 
-            var payload = JsonSerializer.Deserialize<CollectorPayload>(json, new JsonSerializerOptions
+            CollectorPayload? payload;
+            try
             {
-                PropertyNameCaseInsensitive = true
-            });
+                payload = JsonSerializer.Deserialize<CollectorPayload>(json, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+            }
+            catch (JsonException ex)
+            {
+                // Truncated or interleaved output; the raw text is the only way to tell which.
+                return new CollectResult(
+                    false,
+                    null,
+                    $"Collector JSON could not be parsed: {ex.Message} {ComposeFailureDetail(stdout, stderr)}",
+                    false);
+            }
 
             if (payload is null)
             {
@@ -374,7 +394,7 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
         return true;
     }
 
-    private static string? ExtractJsonObject(string raw)
+    internal static string? ExtractJsonObject(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw))
         {
@@ -382,12 +402,60 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
         }
 
         var start = raw.IndexOf('{');
-        var end = raw.LastIndexOf('}');
-        if (start < 0 || end <= start)
+        if (start < 0)
         {
             return null;
         }
 
-        return raw[start..(end + 1)].Trim();
+        // Taking everything up to the LAST brace swallowed any trailing text the remote
+        // shell appended, producing "Expected depth to be zero" instead of a payload.
+        // Track brace depth instead, ignoring braces inside strings, and stop at the object
+        // that actually closes.
+        var depth = 0;
+        var inString = false;
+        var escaped = false;
+
+        for (var index = start; index < raw.Length; index++)
+        {
+            var current = raw[index];
+
+            if (inString)
+            {
+                if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (current == '\\')
+                {
+                    escaped = true;
+                }
+                else if (current == '"')
+                {
+                    inString = false;
+                }
+
+                continue;
+            }
+
+            switch (current)
+            {
+                case '"':
+                    inString = true;
+                    break;
+                case '{':
+                    depth++;
+                    break;
+                case '}':
+                    depth--;
+                    if (depth == 0)
+                    {
+                        return raw[start..(index + 1)].Trim();
+                    }
+
+                    break;
+            }
+        }
+
+        return null;
     }
 }

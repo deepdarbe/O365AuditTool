@@ -55,6 +55,35 @@ public class PsExecCollectorRunnerTests
     }
 
     [Fact]
+    public void ExtractJsonObject_StopsAtTheClosingBraceAndIgnoresTrailingText()
+    {
+        // Taking everything up to the last brace swallowed trailing shell output and
+        // produced "Expected depth to be zero at the end of the JSON payload".
+        const string raw = "noise before {\"schemaVersion\":\"1.3\",\"device\":{\"hostname\":\"PC-01\"}} " +
+                           "PsExec exited on PC-01 with error code 0. {stray}";
+
+        var json = PsExecCollectorRunner.ExtractJsonObject(raw);
+
+        Assert.Equal("{\"schemaVersion\":\"1.3\",\"device\":{\"hostname\":\"PC-01\"}}", json);
+    }
+
+    [Fact]
+    public void ExtractJsonObject_IgnoresBracesInsideStrings()
+    {
+        const string raw = "{\"path\":\"C:\\\\Users\\\\{weird}\\\\mail.pst\",\"ok\":true} trailing";
+
+        var json = PsExecCollectorRunner.ExtractJsonObject(raw);
+
+        Assert.Equal("{\"path\":\"C:\\\\Users\\\\{weird}\\\\mail.pst\",\"ok\":true}", json);
+    }
+
+    [Fact]
+    public void ExtractJsonObject_ReturnsNullWhenTheObjectNeverCloses()
+    {
+        Assert.Null(PsExecCollectorRunner.ExtractJsonObject("{\"schemaVersion\":\"1.3\",\"device\":"));
+    }
+
+    [Fact]
     public void ComposeFailureDetail_PrefersStderrAndAppendsStdout()
     {
         var detail = PsExecCollectorRunner.ComposeFailureDetail(
