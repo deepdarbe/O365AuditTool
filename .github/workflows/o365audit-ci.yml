@@ -12,6 +12,7 @@ on:
       - "scripts/Deploy-ManagementServer.ps1"
       - "scripts/Get-O365AuditDiagnostics.ps1"
       - "scripts/Install-O365AuditTool.ps1"
+      - "scripts/Invoke-CollectorAccessDiagnostic.ps1"
       - "scripts/Invoke-ManualScan.ps1"
       - "scripts/New-O365AuditRelease.ps1"
       - "scripts/Test-O365AuditRelease.ps1"
@@ -71,6 +72,7 @@ jobs:
             '.\scripts\Deploy-ManagementServer.ps1',
             '.\scripts\Get-O365AuditDiagnostics.ps1',
             '.\scripts\Install-O365AuditTool.ps1',
+            '.\scripts\Invoke-CollectorAccessDiagnostic.ps1',
             '.\scripts\Invoke-ManualScan.ps1',
             '.\scripts\New-O365AuditRelease.ps1',
             '.\scripts\Test-O365AuditRelease.ps1',
@@ -99,6 +101,7 @@ jobs:
             '.\scripts\Deploy-ManagementServer.ps1',
             '.\scripts\Get-O365AuditDiagnostics.ps1',
             '.\scripts\Install-O365AuditTool.ps1',
+            '.\scripts\Invoke-CollectorAccessDiagnostic.ps1',
             '.\scripts\Invoke-ManualScan.ps1',
             '.\scripts\New-O365AuditRelease.ps1',
             '.\scripts\Test-O365AuditRelease.ps1',

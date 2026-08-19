@@ -129,12 +129,32 @@ if ($startName -in @('LocalSystem', 'NT AUTHORITY\SYSTEM', '')) {
 # --- Helper to run a probe under the service network identity (psexec -s) --
 function Invoke-AsServiceIdentity {
     param([string]$PowerShellCommand)
+
+    # PsExec writes status text ("Connecting to local system...") to stderr. Capture the
+    # streams into files instead of using 2>&1, which would surface them as terminating
+    # NativeCommandError records under $ErrorActionPreference = 'Stop'. The probe itself is
+    # passed as -EncodedCommand so quoting survives the PsExec -> powershell.exe handoff.
+    $encodedProbe = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($PowerShellCommand))
     $invokeArgs = @(
         "\\$env:COMPUTERNAME", '-accepteula', '-nobanner', '-h', '-s',
-        'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $PowerShellCommand
+        'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedProbe
     )
-    $out = & $psexec @invokeArgs 2>&1
-    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($out -join "`n").Trim() }
+
+    $outFile = New-TemporaryFile
+    $errFile = New-TemporaryFile
+    try {
+        $proc = Start-Process -FilePath $psexec -ArgumentList $invokeArgs -NoNewWindow -PassThru -Wait `
+            -RedirectStandardOutput $outFile.FullName -RedirectStandardError $errFile.FullName
+        $stdout = [string](Get-Content -LiteralPath $outFile.FullName -Raw -ErrorAction SilentlyContinue)
+        $stderr = [string](Get-Content -LiteralPath $errFile.FullName -Raw -ErrorAction SilentlyContinue)
+        return [pscustomobject]@{
+            ExitCode = $proc.ExitCode
+            Output   = ("$stdout`n$stderr").Trim()
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $outFile.FullName, $errFile.FullName -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # --- Endpoint reachability ------------------------------------------------
@@ -212,16 +232,17 @@ $stdoutFile = New-TemporaryFile
 $stderrFile = New-TemporaryFile
 try {
     $proc = Start-Process -FilePath $psexec -ArgumentList $psexecArgs -NoNewWindow -PassThru `
-        -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+        -RedirectStandardOutput $stdoutFile.FullName -RedirectStandardError $stderrFile.FullName
     if (-not $proc.WaitForExit($deviceTimeout * 1000)) {
-        try { $proc.Kill($true) } catch { }
+        # Process.Kill(bool) is .NET Core only; Windows PowerShell 5.1 needs the no-arg overload.
+        try { $proc.Kill() } catch { }
         Add-Check -Name 'Collector PsExec invocation' -Status 'Fail' -Detail "Timed out after $deviceTimeout s (classified Timeout, not Offline)."
         $exit = $null
     } else {
         $exit = $proc.ExitCode
     }
-    $stdout = (Get-Content -LiteralPath $stdoutFile -Raw -ErrorAction SilentlyContinue)
-    $stderr = (Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue)
+    $stdout = (Get-Content -LiteralPath $stdoutFile.FullName -Raw -ErrorAction SilentlyContinue)
+    $stderr = (Get-Content -LiteralPath $stderrFile.FullName -Raw -ErrorAction SilentlyContinue)
 
     if ($null -ne $exit) {
         Write-Host ""
@@ -256,7 +277,7 @@ try {
         Add-Check -Name 'Collector PsExec invocation' -Status ($(if ($exit -eq 0) { 'Pass' } else { 'Fail' })) -Detail "exit=$exit"
     }
 } finally {
-    Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stdoutFile.FullName, $stderrFile.FullName -Force -ErrorAction SilentlyContinue
 }
 
 # --- Summary --------------------------------------------------------------
