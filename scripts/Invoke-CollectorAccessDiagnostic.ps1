@@ -216,6 +216,7 @@ try {
 # authenticates as the service identity. It captures the exact exit code and
 # both output streams -- the ground truth for the "offline" classification.
 Write-Host "`n=== Exact collector invocation (ground truth) ===" -ForegroundColor Cyan
+Write-Host "  Note: this runs as the INTERACTIVE administrator. The service-identity run follows." -ForegroundColor DarkGray
 
 $escapedPath = $remoteScriptPath.Replace("'", "''")
 $inner = "`$p='$escapedPath';`$e='$($remoteScriptSha256.ToUpperInvariant())';" +
@@ -305,6 +306,58 @@ try {
     }
 } finally {
     if ($null -ne $proc) { $proc.Dispose() }
+}
+
+# --- The decisive run: collector invocation UNDER THE SERVICE IDENTITY ----
+# The block above authenticates as whoever is running this console. The scan service
+# authenticates as the machine account / gMSA, which may hold different rights on the
+# endpoint (reading ADMIN$ is not the same as being allowed to CREATE the PSEXESVC
+# service). Nest the real invocation inside "psexec -s" on this host so the outbound hop
+# is made by the service identity, exactly as the collector does it.
+Write-Host "`n=== Collector invocation under service identity ($networkIdentity) ===" -ForegroundColor Cyan
+
+$escapedPsexec = $psexec.Replace("'", "''")
+$nestedCommand =
+    "`$ErrorActionPreference='Continue';" +
+    "`$o = & '$escapedPsexec' '\\$Target' -nobanner -accepteula -h -s powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand '$encoded' 2>&1;" +
+    "Write-Output ('NESTED_EXIT=' + `$LASTEXITCODE);" +
+    "Write-Output ((`$o | Out-String))"
+
+$nested = Invoke-AsServiceIdentity -PowerShellCommand $nestedCommand
+$nestedExit = $null
+if ($nested.Output -match 'NESTED_EXIT=(-?\d+)') {
+    $nestedExit = [int]$Matches[1]
+}
+
+Write-Host ""
+if ($null -eq $nestedExit) {
+    Write-Host "  Could not read the nested exit code. Raw output:" -ForegroundColor Magenta
+    Write-Host ("  " + (($nested.Output -split "`n") -join "`n  "))
+    Add-Check -Name 'Collector under service identity' -Status 'Warn' -Detail 'Nested exit code unavailable; inspect raw output above.'
+}
+else {
+    Write-Host "  PsExec exit code (as $networkIdentity) : $nestedExit" -ForegroundColor $(if ($nestedExit -eq 0) { 'Green' } else { 'Yellow' })
+    $nestedText = ($nested.Output -replace 'NESTED_EXIT=-?\d+', '').Trim()
+    $nestedPreview = $nestedText
+    if ($nestedPreview.Length -gt 1200) { $nestedPreview = $nestedPreview.Substring(0, 1200) + ' ...' }
+    Write-Host "  --- output (first 1200 chars) ---" -ForegroundColor Gray
+    Write-Host ("  " + (($nestedPreview -split "`n") -join "`n  "))
+
+    $nestedDenied = $nestedText -match '(?i)access is denied|erişim engellendi|erişim reddedildi'
+    if ($nestedExit -eq 0) {
+        $nestedVerdict = "SUCCESS as the service identity. The collector works end-to-end for this endpoint; a dashboard Offline result for it is stale data, a different endpoint, or a scope/timeout issue."
+        $nestedColor = 'Green'
+    }
+    elseif ($nestedDenied) {
+        $nestedVerdict = "AUTHORIZATION as $networkIdentity. Reading ADMIN`$ succeeded but the collector run was denied -- the service identity most likely cannot CREATE the remote PSEXESVC service. This is the root cause, and the app classifies it as ERROR (not Offline)."
+        $nestedColor = 'Red'
+    }
+    else {
+        $nestedVerdict = "Interactive run vs service-identity run differ (exit $nestedExit). Compare the two outputs above: the delta is what the service identity lacks."
+        $nestedColor = 'Yellow'
+    }
+    Write-Host "`n  VERDICT: $nestedVerdict" -ForegroundColor $nestedColor
+    Add-Check -Name 'Collector under service identity' -Status ($(if ($nestedExit -eq 0) { 'Pass' } else { 'Fail' })) -Detail "exit=$nestedExit as $networkIdentity"
 }
 
 # --- Summary --------------------------------------------------------------
