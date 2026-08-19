@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using System.Data;
 
 namespace O365AuditTool.Data;
@@ -109,6 +109,7 @@ public static class DatabaseSchemaBootstrapper
         AddColumnIfMissing(db, "RetryQueue", "Ou", "TEXT NULL");
         AddColumnIfMissing(db, "RetryQueue", "Site", "TEXT NULL");
         AddColumnIfMissing(db, "Devices", "CurrentLoggedOnUser", "TEXT NULL");
+        AddColumnIfMissing(db, "Devices", "PsExecExitCode", "INTEGER NULL");
         AddColumnIfMissing(db, "Disks", "BusType", "TEXT NULL");
         AddColumnIfMissing(db, "OfficeProducts", "Architecture", "TEXT NULL");
         AddColumnIfMissing(db, "OfficeProducts", "UpdateChannel", "TEXT NULL");

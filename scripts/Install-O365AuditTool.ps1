@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$BundleUri = "",
 
@@ -26,6 +26,9 @@ param(
     [string[]]$FallbackTargets = @(),
     [string]$DefaultOuFilter = "",
     [string]$DefaultSiteFilter = "",
+    [string[]]$ExcludeDeviceNames = @(),
+    [string[]]$ExcludeOus = @(),
+    [switch]$ExcludeUnknownOperatingSystem,
     [string[]]$AuditAdminGroups = @(),
     [string[]]$AuditReaderGroups = @(),
     [string[]]$MigrationPlannerGroups = @(),
@@ -363,6 +366,9 @@ try {
         'FallbackTargets',
         'DefaultOuFilter',
         'DefaultSiteFilter',
+        'ExcludeDeviceNames',
+        'ExcludeOus',
+        'ExcludeUnknownOperatingSystem',
         'AuditAdminGroups',
         'AuditReaderGroups',
         'MigrationPlannerGroups',

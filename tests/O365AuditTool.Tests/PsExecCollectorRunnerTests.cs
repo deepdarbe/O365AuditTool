@@ -1,4 +1,4 @@
-using O365AuditTool.Services;
+﻿using O365AuditTool.Services;
 using Xunit;
 using Models = O365AuditTool.Models;
 
@@ -26,6 +26,41 @@ public class PsExecCollectorRunnerTests
         // Localized authorization text must classify as Error (not Offline) once the
         // OEM console encoding delivers it intact.
         Assert.False(PsExecCollectorRunner.IsOfflineFailure(exitCode, error));
+    }
+
+    // Regression guard for the 2026-08 "117 devices offline" incident. The classifier used
+    // to test the message text before the exit code, so every authorization failure whose
+    // message contained the generic marker "couldn't access" was stored as Offline and
+    // retried forever while the real cause stayed invisible.
+    [Theory]
+    [InlineData(6, "Couldn't access CORELAPP:\nThe handle is invalid.")]
+    [InlineData(6, "Couldn't access PC-01:\nAğ yolu bulunamadı.")]
+    [InlineData(5, "Couldn't access PC-02: the network path was not found.")]
+    [InlineData(1326, "Couldn't access PC-03: logon failure.")]
+    [InlineData(1789, "Couldn't access PC-04: trust relationship failed.")]
+    [InlineData(1385, "Couldn't access PC-05: timed out.")]
+    public void IsOfflineFailure_LetsTheExitCodeOverrideNetworkSoundingText(int exitCode, string error)
+    {
+        Assert.False(PsExecCollectorRunner.IsOfflineFailure(exitCode, error));
+    }
+
+    // A localized endpoint reports ERROR_INVALID_HANDLE with translated text, so the English
+    // marker alone cannot classify it; only the exit code can.
+    [Theory]
+    [InlineData(6, "PC-06 baglanti hatasi: tanitici gecersiz.")]
+    [InlineData(6, "")]
+    public void IsOfflineFailure_ClassifiesLocalizedInvalidHandleByExitCode(int exitCode, string error)
+    {
+        Assert.False(PsExecCollectorRunner.IsOfflineFailure(exitCode, error));
+    }
+
+    [Theory]
+    [InlineData(53, "Couldn't access PC-07: the network path was not found.")]
+    [InlineData(1722, "")]
+    [InlineData(1231, "")]
+    public void IsOfflineFailure_StillTreatsTransientNetworkExitCodesAsOffline(int exitCode, string error)
+    {
+        Assert.True(PsExecCollectorRunner.IsOfflineFailure(exitCode, error));
     }
 
     [Fact]

@@ -585,6 +585,8 @@
     </div>
   </dialog>
 
+  <!-- dashboard-logic.js must load first: app.js reads the shared failure rules off it at parse time. -->
+  <script src="/dashboard-logic.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

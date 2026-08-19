@@ -8,7 +8,7 @@ namespace O365AuditTool.Services;
 public interface IInventoryIngestionService
 {
     Task<DeviceInventory> SavePayloadAsync(Guid jobId, DeviceTarget target, CollectorPayload payload, CancellationToken cancellationToken);
-    Task<DeviceInventory> SaveFailureAsync(Guid jobId, DeviceTarget target, string error, DeviceScanStatus status, CancellationToken cancellationToken);
+    Task<DeviceInventory> SaveFailureAsync(Guid jobId, DeviceTarget target, string error, DeviceScanStatus status, CancellationToken cancellationToken, int? psExecExitCode = null);
 }
 
 public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIngestionService
@@ -162,7 +162,7 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
         return device;
     }
 
-    public async Task<DeviceInventory> SaveFailureAsync(Guid jobId, DeviceTarget target, string error, DeviceScanStatus status, CancellationToken cancellationToken)
+    public async Task<DeviceInventory> SaveFailureAsync(Guid jobId, DeviceTarget target, string error, DeviceScanStatus status, CancellationToken cancellationToken, int? psExecExitCode = null)
     {
         if (status is DeviceScanStatus.Success or DeviceScanStatus.Partial)
         {
@@ -178,6 +178,7 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
             CollectedUtc = DateTime.UtcNow,
             Status = status,
             ErrorMessage = Truncate(error, 4096),
+            PsExecExitCode = psExecExitCode,
             IpAddressesJson = "[]",
             RawPayloadJson = "{}"
         };

@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using O365AuditTool.Data;
 using O365AuditTool.Models;
@@ -300,7 +300,8 @@ public class ScanOrchestratorService(
                                 target,
                                 result.ErrorMessage ?? "Unknown error",
                                 GetFailureStatus(result),
-                                deviceCancellationToken);
+                                deviceCancellationToken,
+                                result.ExitCode);
 
                             if (item.Status == DeviceScanStatus.Offline)
                             {
@@ -403,7 +404,8 @@ public class ScanOrchestratorService(
                                 target,
                                 result.ErrorMessage ?? "Unknown retry error",
                                 failureStatus,
-                                deviceCancellationToken);
+                                deviceCancellationToken,
+                                result.ExitCode);
 
                             if (failureStatus != DeviceScanStatus.Offline)
                             {

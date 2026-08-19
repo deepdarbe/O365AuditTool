@@ -473,37 +473,12 @@ async function loadData() {
   }
 }
 
-const failureMarkers = [
-  { re: /(access is denied|erişim engellendi|erişim reddedildi)/i, category: "auth", label: "Erişim reddedildi", hint: "Servis kimliği endpoint local Administrator değil ya da ADMIN$/SCM erişimi kısıtlı." },
-  { re: /(network path was not found|ağ yolu bulunamadı)/i, category: "network", label: "Ağ yolu bulunamadı", hint: "SMB/TCP 445 kapalı, ADMIN$ devre dışı veya cihaz gerçekten kapalı." },
-  { re: /(rpc server is unavailable|rpc sunucusu kullanılamıyor)/i, category: "network", label: "RPC sunucusu kullanılamıyor", hint: "Uzak Service Control Manager / RPC erişilemiyor." },
-  { re: /(no such host is known|ana bilgisayar bilinmiyor)/i, category: "network", label: "Ana bilgisayar bilinmiyor", hint: "DNS çözümlemesi başarısız veya kayıt bayat." },
-  { re: /(host is unreachable|network location cannot be reached|network name is no longer available)/i, category: "network", label: "Ağ konumuna ulaşılamıyor", hint: "Segmentasyon, firewall veya cihaz erişilemez." },
-  { re: /(timed out|zaman aşımı|timeout)/i, category: "timeout", label: "Zaman aşımı", hint: "Toplayıcı süre içinde yanıt vermedi; yavaş cihaz veya yarı-açık bağlantı." },
-  { re: /(could not start|couldn't access)/i, category: "network", label: "PsExec endpoint'e erişemedi", hint: "Servis kopyalanamadı/başlatılamadı; ADMIN$/SCM erişimini doğrulayın." },
-  { re: /(integrity validation failed|sha256)/i, category: "error", label: "Bütünlük doğrulaması başarısız", hint: "Collector veya PsExec hash'i beklenen değerle uyuşmuyor." }
-];
+// Failure classification lives in dashboard-logic.js and is shared with the server rules in
+// PsExecCollectorRunner.IsOfflineFailure. Keeping a second copy here is what let the dashboard
+// drift and label the 2026-08 authorization incident (PsExec exit 6) as "Ağ / Offline".
+const { categoryLabels, parsePsExecExit, classifyFailure } = globalThis.O365Dashboard;
 
 const statusFilterNames = { 1: "Offline", 2: "Error", 3: "Partial", 4: "Timeout" };
-
-function parsePsExecExit(message) {
-  const match = /PsExec exit (-?\d+)\s*:/i.exec(message || "");
-  return match ? Number(match[1]) : null;
-}
-
-function classifyFailure(device) {
-  const statusNum = Number(device.status);
-  const message = String(device.errorMessage || "").trim();
-  const exit = parsePsExecExit(message);
-  const core = message.replace(/^PsExec exit -?\d+\s*:\s*/i, "").trim();
-  const marker = failureMarkers.find(item => item.re.test(message));
-  if (marker) {
-    return { category: marker.category, label: marker.label, hint: marker.hint, exit, statusNum };
-  }
-  const fallbackCategory = statusNum === 4 ? "timeout" : statusNum === 1 ? "network" : "error";
-  const fallbackLabel = core ? core.slice(0, 90) : "Sınıflandırılmamış hata";
-  return { category: fallbackCategory, label: fallbackLabel, hint: "Tam metin için cihaz satırındaki 'Tarama hatası' sütununa bakın.", exit, statusNum };
-}
 
 function buildFailureRow(group) {
   const row = document.createElement("div");
@@ -516,7 +491,7 @@ function buildFailureRow(group) {
 
   const badge = document.createElement("span");
   badge.className = `failure-badge ${group.category}`;
-  badge.textContent = { network: "Ağ / Offline", auth: "Yetki", timeout: "Zaman aşımı", error: "Hata" }[group.category] || "Hata";
+  badge.textContent = categoryLabels[group.category] || categoryLabels.error;
   row.appendChild(badge);
 
   if (group.exit !== null && group.exit !== undefined) {

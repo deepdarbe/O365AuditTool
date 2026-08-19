@@ -80,7 +80,11 @@ public class CollectorScriptTests
         Assert.Contains("[switch]$AutoConfigure", deployment, StringComparison.Ordinal);
         Assert.Contains("Resolve-DomainRidAccount -Rid 512", deployment, StringComparison.Ordinal);
         Assert.Contains("New-AutomaticTlsCertificate", deployment, StringComparison.Ordinal);
-        Assert.Contains("$DefaultOuFilter = Get-DefaultDomainNamingContext", deployment, StringComparison.Ordinal);
+        // AutoConfigure used to default the scan scope to the domain naming context, which is what put
+        // the servers, the domain controller, the DMZ hosts and the domain-joined NAS appliances into
+        // every nightly run on nbr.local. The scope is now an explicit operator decision on every path.
+        Assert.DoesNotContain("$DefaultOuFilter = Get-DefaultDomainNamingContext", deployment, StringComparison.Ordinal);
+        Assert.Contains("Deployment tarama kapsamini kendisi belirleyemez", deployment, StringComparison.Ordinal);
         Assert.Contains("$deployArguments.AutoConfigure = $true", bootstrap, StringComparison.Ordinal);
     }
 

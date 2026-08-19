@@ -17,7 +17,13 @@ public enum DeviceScanStatus
     Offline,
     Error,
     Partial,
-    Timeout
+    Timeout,
+
+    /// <summary>
+    /// The device was in the AD scope but deliberately skipped (server/DC/appliance or an
+    /// explicit exclusion). Appended last so existing persisted ordinals keep their meaning.
+    /// </summary>
+    Excluded
 }
 
 public enum CopyJobStatus
@@ -80,6 +86,13 @@ public class DeviceInventory
     public DateTime CollectedUtc { get; set; }
     public DeviceScanStatus Status { get; set; } = DeviceScanStatus.Success;
     [MaxLength(4096)] public string? ErrorMessage { get; set; }
+
+    /// <summary>
+    /// Raw PsExec process exit code for a failed attempt. Kept in its own column because
+    /// grouping failures by parsed message text is what let a single authorization failure
+    /// (exit 6) masquerade as a network outage across 117 devices in 2026-08.
+    /// </summary>
+    public int? PsExecExitCode { get; set; }
     public string IpAddressesJson { get; set; } = "[]";
     public string RawPayloadJson { get; set; } = "{}";
 

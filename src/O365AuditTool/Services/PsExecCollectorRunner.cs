@@ -68,6 +68,23 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
             return new CollectResult(false, null, "Collector script SHA256 is missing or invalid.", false);
         }
 
+        // Offline must be MEASURED, not inferred from PsExec error text afterwards. Probing
+        // the SMB port PsExec itself needs gives a deterministic answer in seconds and keeps
+        // authorization failures (which do reach the port) from ever looking like Offline.
+        if (_options.ReachabilityProbeEnabled)
+        {
+            var probe = await ProbeSmbAsync(deviceName, cancellationToken);
+            if (!probe.Reachable)
+            {
+                return new CollectResult(
+                    false,
+                    null,
+                    $"Device is unreachable: no answer on TCP {_options.ReachabilityProbePort} within " +
+                    $"{Math.Clamp(_options.ReachabilityProbeTimeoutSeconds, 1, 120)} seconds ({probe.Detail}).",
+                    true);
+            }
+        }
+
         using var process = new Process
         {
             StartInfo = BuildStartInfo(_options.PsExecPath)
@@ -76,6 +93,12 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
         process.StartInfo.ArgumentList.Add($"\\\\{deviceName}");
         process.StartInfo.ArgumentList.Add("-nobanner");
         process.StartInfo.ArgumentList.Add("-accepteula");
+        // -n bounds only the CONNECT phase. Without it an unreachable endpoint holds its
+        // parallel slot until DeviceTimeoutSeconds, which is the collector budget, not a
+        // connect budget. The proven 2026-03 deployment script used -n 30 for this reason.
+        process.StartInfo.ArgumentList.Add("-n");
+        process.StartInfo.ArgumentList.Add(
+            Math.Clamp(_options.PsExecConnectTimeoutSeconds, 1, 600).ToString(CultureInfo.InvariantCulture));
         process.StartInfo.ArgumentList.Add("-h");
         process.StartInfo.ArgumentList.Add("-s");
         process.StartInfo.ArgumentList.Add("powershell");
@@ -116,10 +139,16 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
                     "Collector timed out after {TimeoutSeconds} seconds for {Device}",
                     _options.DeviceTimeoutSeconds,
                     deviceName);
+
+                // Whatever PsExec already printed tells the operator WHICH phase hung
+                // (connect, PSEXESVC install, or the collector itself). Killing the tree
+                // closes the pipes, so the readers complete; the grace period only guards
+                // against a stuck handle and never blocks the scan.
+                var timeoutDetail = await ReadStreamsWithGraceAsync(stdoutTask, stderrTask);
                 return new CollectResult(
                     false,
                     null,
-                    $"Collector timed out after {_options.DeviceTimeoutSeconds} seconds.",
+                    $"Collector timed out after {_options.DeviceTimeoutSeconds} seconds. {timeoutDetail}",
                     false,
                     true);
             }
@@ -149,7 +178,8 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
                     false,
                     null,
                     $"Collector output did not contain JSON payload. {ComposeFailureDetail(stdout, stderr)}",
-                    false);
+                    false,
+                    ExitCode: process.ExitCode);
             }
 
             CollectorPayload? payload;
@@ -167,20 +197,21 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
                     false,
                     null,
                     $"Collector JSON could not be parsed: {ex.Message} {ComposeFailureDetail(stdout, stderr)}",
-                    false);
+                    false,
+                    ExitCode: process.ExitCode);
             }
 
             if (payload is null)
             {
-                return new CollectResult(false, null, "Collector JSON could not be parsed.", false);
+                return new CollectResult(false, null, "Collector JSON could not be parsed.", false, ExitCode: process.ExitCode);
             }
 
             if (!TryNormalizePayload(payload, deviceName, out var payloadError))
             {
-                return new CollectResult(false, null, payloadError, false);
+                return new CollectResult(false, null, payloadError, false, ExitCode: process.ExitCode);
             }
 
-            return new CollectResult(true, payload, null, false);
+            return new CollectResult(true, payload, null, false, ExitCode: process.ExitCode);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -259,8 +290,128 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
     private static string Bound(string value, int maxLength) =>
         value.Length <= maxLength ? value : value[..maxLength];
 
+    internal readonly record struct ReachabilityProbeResult(bool Reachable, string Detail);
+
+    /// <summary>
+    /// Opens a TCP connection to the SMB port PsExec depends on. A refused connection still
+    /// counts as reachable: the host answered, so the device is not offline and the failure
+    /// belongs to a later stage (firewall policy, service state, authorization).
+    /// </summary>
+    private async Task<ReachabilityProbeResult> ProbeSmbAsync(string deviceName, CancellationToken cancellationToken)
+    {
+        var port = _options.ReachabilityProbePort is > 0 and <= 65535 ? _options.ReachabilityProbePort : 445;
+        var primary = await ProbePortAsync(deviceName, port, cancellationToken);
+        if (primary.Reachable || port != 445)
+        {
+            return primary;
+        }
+
+        // PsExec reaches ADMIN$ over SMB direct (445) or NetBIOS (139). Declaring a device
+        // offline on 445 alone would mislabel an old endpoint that only listens on 139.
+        var legacy = await ProbePortAsync(deviceName, 139, cancellationToken);
+        return legacy.Reachable
+            ? legacy with { Detail = $"{legacy.Detail} on 139" }
+            : primary;
+    }
+
+    private async Task<ReachabilityProbeResult> ProbePortAsync(string deviceName, int port, CancellationToken cancellationToken)
+    {
+        var timeout = TimeSpan.FromSeconds(Math.Clamp(_options.ReachabilityProbeTimeoutSeconds, 1, 120));
+
+        using var probeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        probeCts.CancelAfter(timeout);
+
+        try
+        {
+            using var client = new System.Net.Sockets.TcpClient();
+            await client.ConnectAsync(deviceName, port, probeCts.Token);
+            return new ReachabilityProbeResult(true, "connected");
+        }
+        catch (System.Net.Sockets.SocketException ex)
+            when (ex.SocketErrorCode is System.Net.Sockets.SocketError.ConnectionRefused
+                or System.Net.Sockets.SocketError.ConnectionReset)
+        {
+            return new ReachabilityProbeResult(true, $"port closed ({ex.SocketErrorCode})");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            // Deliberately not the word "timed out": this is an unreachable device, and the dashboard
+            // classifies a timeout as a collector that ran too long, which is a different failure.
+            return new ReachabilityProbeResult(false, "no response");
+        }
+        catch (Exception ex)
+        {
+            return new ReachabilityProbeResult(false, ex.GetType().Name);
+        }
+    }
+
+    /// <summary>
+    /// Collects whatever the already-started stream readers produced, bounded by a short
+    /// grace period so a stuck pipe handle can never hold the device slot open.
+    /// </summary>
+    private static async Task<string> ReadStreamsWithGraceAsync(Task<string> stdoutTask, Task<string> stderrTask)
+    {
+        try
+        {
+            var both = Task.WhenAll(stdoutTask, stderrTask);
+            var completed = await Task.WhenAny(both, Task.Delay(TimeSpan.FromSeconds(3)));
+            if (completed != both)
+            {
+                return "PsExec output was not readable before the timeout grace period elapsed.";
+            }
+
+            return ComposeFailureDetail(
+                stdoutTask.IsCompletedSuccessfully ? stdoutTask.Result : string.Empty,
+                stderrTask.IsCompletedSuccessfully ? stderrTask.Result : string.Empty);
+        }
+        catch (Exception)
+        {
+            // Diagnostics must never turn a timeout into a different failure.
+            return "PsExec output could not be read after the timeout.";
+        }
+    }
+
+    // Windows system error codes PsExec returns when the connection or the service-install
+    // step was refused. Measured on nbr.local in 2026-08: the management service ran as
+    // LocalSystem, so the endpoint saw the machine account, which cannot write ADMIN$, and
+    // PsExec reported that as exit 6 "Couldn't access <host>: The handle is invalid.".
+    // These are authorization failures, never transient — retrying them only hides the cause.
+    private static readonly int[] AuthorizationExitCodes =
+    [
+        5,    // ERROR_ACCESS_DENIED
+        6,    // ERROR_INVALID_HANDLE (PsExec's report for a refused ADMIN$/IPC$ session)
+        1311, // ERROR_NO_LOGON_SERVERS
+        1326, // ERROR_LOGON_FAILURE
+        1327, // ERROR_ACCOUNT_RESTRICTION
+        1331, // ERROR_ACCOUNT_DISABLED
+        1385, // ERROR_LOGON_TYPE_NOT_GRANTED
+        1789  // ERROR_TRUSTED_RELATIONSHIP_FAILURE
+    ];
+
+    private static readonly int[] TransientNetworkExitCodes =
+        [53, 64, 67, 121, 1231, 1232, 1460, 1722, 1726];
+
     internal static bool IsOfflineFailure(int exitCode, string error)
     {
+        // The exit code decides first and the text only breaks ties. The previous order was
+        // text-first, so any authorization failure whose message happened to contain the
+        // generic marker "couldn't access" was stored as Offline and retried forever. That
+        // is exactly how 117 endpoints were reported Offline in 2026-08 while the real cause
+        // (the service identity could not write ADMIN$) never surfaced anywhere.
+        if (AuthorizationExitCodes.Contains(exitCode))
+        {
+            return false;
+        }
+
+        if (TransientNetworkExitCodes.Contains(exitCode))
+        {
+            return true;
+        }
+
         if (error.Contains("access is denied", StringComparison.OrdinalIgnoreCase) ||
             error.Contains("erişim engellendi", StringComparison.OrdinalIgnoreCase) ||
             error.Contains("erişim reddedildi", StringComparison.OrdinalIgnoreCase))
@@ -268,21 +419,15 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
             return false;
         }
 
-        // PsExec reports a failed connection or authentication as
-        // "Couldn't access <host>: The handle is invalid." (exit 6). Measured on a customer
-        // domain: the same invocation succeeded as an endpoint administrator and failed this
-        // way as the management server's machine account, which could not write to the
-        // endpoint ADMIN$. It is an authorization failure, so it must classify as Error —
-        // retrying it as Offline only hides that the service identity lacks endpoint rights.
-        if (error.Contains("handle is invalid", StringComparison.OrdinalIgnoreCase))
+        // Localized builds report ERROR_INVALID_HANDLE with a translated message, so the
+        // English text alone is not enough; the code check above covers the localized case.
+        if (error.Contains("handle is invalid", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("tanıtıcı geçersiz", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("oturum açma", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("logon failure", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("trust relationship", StringComparison.OrdinalIgnoreCase))
         {
             return false;
-        }
-
-        int[] transientNetworkCodes = [53, 64, 67, 121, 1231, 1232, 1460, 1722, 1726];
-        if (transientNetworkCodes.Contains(exitCode))
-        {
-            return true;
         }
 
         string[] markers =
