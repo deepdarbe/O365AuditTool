@@ -94,9 +94,17 @@ $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
 $collectorArgs = "\\$Target -nobanner -accepteula -h -s powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
 $echoArgs = "\\$Target -nobanner -accepteula -h -s cmd /c echo COLLECTOR_PROBE_OK"
 
-function Invoke-PipesRun {
-    param([string]$Name, [string]$Description, [string]$PsExecArguments)
-    # Exactly how PsExecCollectorRunner starts PsExec today.
+function Invoke-Run {
+    param(
+        [string]$Name,
+        [string]$Description,
+        [string]$PsExecArguments,
+        [bool]$RedirectOut,
+        [bool]$RedirectErr,
+        [bool]$RedirectIn
+    )
+    # Output is captured only when the corresponding stream is redirected; the point of
+    # the matrix is which redirection, if any, triggers exit 6 under session 0.
     $code = 'HATA'
     $so = ''
     $se = ''
@@ -106,23 +114,23 @@ function Invoke-PipesRun {
         $psi.FileName = $psexec
         $psi.Arguments = $PsExecArguments
         $psi.UseShellExecute = $false
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $RedirectOut
+        $psi.RedirectStandardError = $RedirectErr
+        $psi.RedirectStandardInput = $RedirectIn
         $psi.CreateNoWindow = $false
         $p = [Diagnostics.Process]::Start($psi)
-        $p.StandardInput.Close()
-        $o = $p.StandardOutput.ReadToEndAsync()
-        $e = $p.StandardError.ReadToEndAsync()
-        if ($p.WaitForExit(180000)) {
-            $code = $p.ExitCode
-        }
+        if ($RedirectIn) { $p.StandardInput.Close() }
+        $o = $null
+        $e = $null
+        if ($RedirectOut) { $o = $p.StandardOutput.ReadToEndAsync() }
+        if ($RedirectErr) { $e = $p.StandardError.ReadToEndAsync() }
+        if ($p.WaitForExit(180000)) { $code = $p.ExitCode }
         else {
             $note = 'ZAMAN ASIMI (180s)'
             try { $p.Kill() } catch { }
         }
-        $so = [string]$o.Result
-        $se = [string]$e.Result
+        if ($null -ne $o) { $so = [string]$o.Result }
+        if ($null -ne $e) { $se = [string]$e.Result }
         $p.Dispose()
     }
     catch {
@@ -131,34 +139,28 @@ function Invoke-PipesRun {
 
     $captured = $so.Contains('COLLECTOR_PROBE_OK') -or $so.Contains('"schemaVersion"')
     $handleInvalid = ($so + "`n" + $se) -match '(?i)handle is invalid'
-    Write-Report ("{0,-16} {1,-26} exit={2,-6} cikti={3,-6} handleInvalid={4,-6} {5}" -f `
+    Write-Report ("{0,-14} {1,-30} exit={2,-6} cikti={3,-6} handleInvalid={4,-6} {5}" -f `
         $Name, $Description, $code, $captured, $handleInvalid, $note)
-
-    if (-not [string]::IsNullOrWhiteSpace($se)) {
-        $preview = $se.Trim()
-        if ($preview.Length -gt 160) { $preview = $preview.Substring(0, 160) + ' ...' }
-        Write-Report ("                 stderr: " + ($preview -replace "`r?`n", ' | '))
-    }
-    if ($captured -and $so.Contains('"schemaVersion"')) {
-        Write-Report ("                 payload ilk 120: " + $so.Trim().Substring(0, [Math]::Min(120, $so.Trim().Length)))
-    }
 }
 
-# --- A: no console (what the service has today) ---------------------------
+# A console is allocated first: the previous run proved it is not sufficient on its
+# own, so it is held constant while only the redirection varies.
 $null = [Probe.ConsoleApi]::FreeConsole()
-Write-Report "--- A: KONSOLSUZ (servisin bugunku durumu) ---"
-Write-Report "konsol handle: $([Probe.ConsoleApi]::GetConsoleWindow())"
-Invoke-PipesRun -Name 'A1-echo'      -Description 'konsolsuz, echo'      -PsExecArguments $echoArgs
-Invoke-PipesRun -Name 'A2-collector' -Description 'konsolsuz, collector' -PsExecArguments $collectorArgs
-
-# --- B: with an allocated console (the candidate fix) ---------------------
-Write-Report ""
 $allocated = [Probe.ConsoleApi]::AllocConsole()
-Write-Report "--- B: AllocConsole (aday duzeltme) ---"
-Write-Report "AllocConsole sonucu: $allocated - konsol handle: $([Probe.ConsoleApi]::GetConsoleWindow())"
-Invoke-PipesRun -Name 'B1-echo'      -Description 'konsollu, echo'       -PsExecArguments $echoArgs
-Invoke-PipesRun -Name 'B2-collector' -Description 'konsollu, collector'  -PsExecArguments $collectorArgs
+Write-Report "AllocConsole: $allocated - konsol handle: $([Probe.ConsoleApi]::GetConsoleWindow())"
+Write-Report ""
+Write-Report "--- Yonlendirme matrisi (echo komutu, konsol sabit) ---"
+
+Invoke-Run -Name 'M0-hicbiri'  -Description 'yonlendirme YOK'        -PsExecArguments $echoArgs -RedirectOut $false -RedirectErr $false -RedirectIn $false
+Invoke-Run -Name 'M1-sadeceIn' -Description 'sadece stdin'           -PsExecArguments $echoArgs -RedirectOut $false -RedirectErr $false -RedirectIn $true
+Invoke-Run -Name 'M2-sadeceOut'-Description 'sadece stdout'          -PsExecArguments $echoArgs -RedirectOut $true  -RedirectErr $false -RedirectIn $false
+Invoke-Run -Name 'M3-sadeceErr'-Description 'sadece stderr'          -PsExecArguments $echoArgs -RedirectOut $false -RedirectErr $true  -RedirectIn $false
+Invoke-Run -Name 'M4-hepsi'    -Description 'hepsi (mevcut kod)'     -PsExecArguments $echoArgs -RedirectOut $true  -RedirectErr $true  -RedirectIn $true
 
 Write-Report ""
-Write-Report "Aranan: B satirlarinda exit=0 ve cikti=True (A satirlari exit=6 kalirken)."
+Write-Report "--- Gercek collector, yonlendirmesiz ---"
+Invoke-Run -Name 'C0-hicbiri'  -Description 'collector, yonlendirme YOK' -PsExecArguments $collectorArgs -RedirectOut $false -RedirectErr $false -RedirectIn $false
 
+Write-Report ""
+Write-Report "Aranan: hangi yonlendirme exit 6'yi tetikliyor. M0/C0 = 0 ise cikti"
+Write-Report "yakalamayi uzak tarafa (ADMIN$ uzerinden dosya) tasimak gerekir."
