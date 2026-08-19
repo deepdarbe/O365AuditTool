@@ -223,9 +223,23 @@ function renderOuOptions(searchTerm = "") {
   replaceScopeOptions(
     "fOu",
     matches,
-    normalizedSearch ? `${matches.length} OU eşleşti` : "Bir OU seçin",
+    normalizedSearch ? `Bir OU seçin · ${matches.length} eşleşme` : "Bir OU seçin",
     item => item.distinguishedName,
     item => `${"\u00a0\u00a0".repeat(Math.max(0, Number(item.depth || 1) - 1))}${item.displayName || item.name}`);
+
+  // Searching only filters the list; the placeholder stays selected, so an operator who
+  // typed a full DN could believe a scope was chosen while the scan button stayed disabled.
+  // Select automatically when the search leaves no ambiguity.
+  const select = byId("fOu");
+  if (!select.value && normalizedSearch) {
+    const exact = matches.find(item =>
+      String(item.distinguishedName || "").toLocaleLowerCase("tr-TR") === normalizedSearch);
+    const resolved = exact || (matches.length === 1 ? matches[0] : null);
+    if (resolved) {
+      select.value = resolved.distinguishedName;
+    }
+  }
+  updateScanReadiness();
 }
 
 function updateScanReadiness() {
