@@ -1,5 +1,8 @@
 # O365 Migration Audit Runtime ve Copy Mimarisi
 
+> Collector calisma akisi, offline/error siniflandirma karar agaci ve teshis
+> icin ayrica bkz. [COLLECTOR-RUNTIME-AND-DIAGNOSTICS.md](COLLECTOR-RUNTIME-AND-DIAGNOSTICS.md).
+
 ## Amac
 
 Sistem Windows oturumuyla kimlik dogrulanan merkezi dashboard'dan AD hedef kesfi, agentless PsExec collector calistirma, tum kullanici profillerinde envanter toplama, raporlama ve kontrollu migration copy akislarini yonetir. Kesfedilen PST/NK2/N2K dosyalari dogrudan kopyalanmaz; once degismez bir inventory snapshot'ina bagli copy plani olusturulur, ardindan yetkili kullanici hedefi ve oge sayisini gorerek plani acikca execute eder.
