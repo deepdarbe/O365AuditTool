@@ -70,21 +70,8 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
 
         using var process = new Process
         {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = _options.PsExecPath,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
+            StartInfo = BuildStartInfo(_options.PsExecPath)
         };
-
-        if (ConsoleOutputEncoding is not null)
-        {
-            process.StartInfo.StandardOutputEncoding = ConsoleOutputEncoding;
-            process.StartInfo.StandardErrorEncoding = ConsoleOutputEncoding;
-        }
 
         process.StartInfo.ArgumentList.Add($"\\\\{deviceName}");
         process.StartInfo.ArgumentList.Add("-nobanner");
@@ -103,6 +90,9 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
         try
         {
             process.Start();
+            // PsExec only needs a valid stdin handle, never any input. Close it so the
+            // remote process cannot block waiting on the pipe.
+            process.StandardInput.Close();
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
 
@@ -198,6 +188,34 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
         {
             logger.LogWarning(ex, "Failed to kill timed-out PsExec process for {Device}", deviceName);
         }
+    }
+
+    internal static ProcessStartInfo BuildStartInfo(string psExecPath)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = psExecPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            // PsExec duplicates the caller's standard handles for the remote process. Running
+            // as a session-0 Windows service there is no console, so leaving stdin
+            // un-redirected hands PsExec an invalid handle and it fails with
+            // "Couldn't access <host>: The handle is invalid." (exit 6). That text matches the
+            // generic network markers, so every endpoint was then misreported as Offline.
+            // Redirecting stdin gives PsExec a valid pipe handle; the stream is closed
+            // immediately after start so the remote process never waits on input.
+            RedirectStandardInput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        if (ConsoleOutputEncoding is not null)
+        {
+            startInfo.StandardOutputEncoding = ConsoleOutputEncoding;
+            startInfo.StandardErrorEncoding = ConsoleOutputEncoding;
+        }
+
+        return startInfo;
     }
 
     internal static string ComposeFailureDetail(string? stdout, string? stderr)

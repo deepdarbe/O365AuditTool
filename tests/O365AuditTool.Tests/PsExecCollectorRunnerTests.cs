@@ -29,6 +29,34 @@ public class PsExecCollectorRunnerTests
     }
 
     [Fact]
+    public void BuildStartInfo_RedirectsStdinSoPsExecHasAValidHandle()
+    {
+        // Regression: without a redirected stdin, PsExec launched from the session-0
+        // service has no console handle to duplicate and fails with
+        // "Couldn't access <host>: The handle is invalid." (exit 6), which the classifier
+        // then reported as Offline for every endpoint.
+        var startInfo = PsExecCollectorRunner.BuildStartInfo(@"C:\tools\psexec.exe");
+
+        Assert.True(startInfo.RedirectStandardInput);
+        Assert.True(startInfo.RedirectStandardOutput);
+        Assert.True(startInfo.RedirectStandardError);
+        Assert.False(startInfo.UseShellExecute);
+        Assert.True(startInfo.CreateNoWindow);
+        Assert.Equal(@"C:\tools\psexec.exe", startInfo.FileName);
+    }
+
+    [Fact]
+    public void IsOfflineFailure_TreatsInvalidHandleAsOffline_DocumentingTheReportedSymptom()
+    {
+        // Exit 6 with "Couldn't access" matched the generic network marker, which is why
+        // 117/118 powered-on endpoints were reported Offline instead of surfacing the real
+        // handle defect. Kept as documentation of the observed customer text.
+        Assert.True(PsExecCollectorRunner.IsOfflineFailure(
+            6,
+            "Couldn't access CORELAPP:\nThe handle is invalid."));
+    }
+
+    [Fact]
     public void ComposeFailureDetail_PrefersStderrAndAppendsStdout()
     {
         var detail = PsExecCollectorRunner.ComposeFailureDetail(
