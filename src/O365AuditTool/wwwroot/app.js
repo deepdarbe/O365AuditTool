@@ -885,9 +885,17 @@ function renderScanProgress(job) {
   const progress = byId("scanProgressBar");
   byId("scanProgress").hidden = false;
   byId("scanProgressTitle").textContent = `Tarama ${status.toLocaleLowerCase("tr-TR")} · ${job.id || activeScanJobId}`;
+  // A failed job never gets device stats, so without this it kept showing
+  // "preparing the target list" and the actual reason (job notes) stayed hidden.
+  const notes = String(job?.notes || "").trim();
+  const failed = Number(job?.status) === 4 || String(job?.status || "").toLowerCase() === "failed";
   byId("scanProgressDetail").textContent = total
     ? `${completed}/${total} sonuç · ${stats.success || 0} başarılı · ${stats.offline || 0} çevrimdışı · ${(stats.error || 0) + (stats.partial || 0) + (stats.timeout || 0)} hata/kısmi`
-    : "Hedef cihaz listesi hazırlanıyor.";
+    : failed
+      ? (notes || "Tarama başarısız oldu; sunucu bir neden bildirmedi. Servis günlüklerine bakın.")
+      : isTerminalJobStatus(job?.status)
+        ? (notes || "Tarama tamamlandı fakat hiçbir cihaz sonucu kaydedilmedi.")
+        : "Hedef cihaz listesi hazırlanıyor.";
   if (total > 0) {
     progress.max = total;
     progress.value = Math.min(completed, total);
