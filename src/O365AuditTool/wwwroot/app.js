@@ -323,12 +323,19 @@ function appendCell(row, value, className = "") {
   return cell;
 }
 
-function appendStatusCell(row, text, className) {
+function appendStatusCell(row, text, className, exitCode = null) {
   const cell = document.createElement("td");
   const status = document.createElement("span");
   status.textContent = text;
   status.className = className;
   cell.appendChild(status);
+  if (exitCode !== null && exitCode !== undefined) {
+    const badge = document.createElement("span");
+    badge.className = "status-exit";
+    badge.textContent = `PsExec exit ${exitCode}`;
+    badge.title = "Toplayıcının döndürdüğü PsExec çıkış kodu";
+    cell.append(document.createElement("br"), badge);
+  }
   row.appendChild(cell);
 }
 
@@ -415,6 +422,7 @@ async function loadData() {
     const data = asArray(await fetchJson(`/api/inventory/devices?${query}`));
     const stats = renderStats(data);
     renderDeviceRows(data, query.size > 0);
+    renderFailureSummary(data);
     const updatedTime = new Date().toLocaleTimeString("tr-TR");
     const stamp = `Güncel · ${updatedTime}`;
     const degraded = data.length > 0 && (stats.offline > 0 || stats.errors > 0);
@@ -448,6 +456,122 @@ async function loadData() {
     setButtonBusy(filterButton, false);
     updateReadinessSummary();
   }
+}
+
+const failureMarkers = [
+  { re: /(access is denied|erişim engellendi|erişim reddedildi)/i, category: "auth", label: "Erişim reddedildi", hint: "Servis kimliği endpoint local Administrator değil ya da ADMIN$/SCM erişimi kısıtlı." },
+  { re: /(network path was not found|ağ yolu bulunamadı)/i, category: "network", label: "Ağ yolu bulunamadı", hint: "SMB/TCP 445 kapalı, ADMIN$ devre dışı veya cihaz gerçekten kapalı." },
+  { re: /(rpc server is unavailable|rpc sunucusu kullanılamıyor)/i, category: "network", label: "RPC sunucusu kullanılamıyor", hint: "Uzak Service Control Manager / RPC erişilemiyor." },
+  { re: /(no such host is known|ana bilgisayar bilinmiyor)/i, category: "network", label: "Ana bilgisayar bilinmiyor", hint: "DNS çözümlemesi başarısız veya kayıt bayat." },
+  { re: /(host is unreachable|network location cannot be reached|network name is no longer available)/i, category: "network", label: "Ağ konumuna ulaşılamıyor", hint: "Segmentasyon, firewall veya cihaz erişilemez." },
+  { re: /(timed out|zaman aşımı|timeout)/i, category: "timeout", label: "Zaman aşımı", hint: "Toplayıcı süre içinde yanıt vermedi; yavaş cihaz veya yarı-açık bağlantı." },
+  { re: /(could not start|couldn't access)/i, category: "network", label: "PsExec endpoint'e erişemedi", hint: "Servis kopyalanamadı/başlatılamadı; ADMIN$/SCM erişimini doğrulayın." },
+  { re: /(integrity validation failed|sha256)/i, category: "error", label: "Bütünlük doğrulaması başarısız", hint: "Collector veya PsExec hash'i beklenen değerle uyuşmuyor." }
+];
+
+const statusFilterNames = { 1: "Offline", 2: "Error", 3: "Partial", 4: "Timeout" };
+
+function parsePsExecExit(message) {
+  const match = /PsExec exit (-?\d+)\s*:/i.exec(message || "");
+  return match ? Number(match[1]) : null;
+}
+
+function classifyFailure(device) {
+  const statusNum = Number(device.status);
+  const message = String(device.errorMessage || "").trim();
+  const exit = parsePsExecExit(message);
+  const core = message.replace(/^PsExec exit -?\d+\s*:\s*/i, "").trim();
+  const marker = failureMarkers.find(item => item.re.test(message));
+  if (marker) {
+    return { category: marker.category, label: marker.label, hint: marker.hint, exit, statusNum };
+  }
+  const fallbackCategory = statusNum === 4 ? "timeout" : statusNum === 1 ? "network" : "error";
+  const fallbackLabel = core ? core.slice(0, 90) : "Sınıflandırılmamış hata";
+  return { category: fallbackCategory, label: fallbackLabel, hint: "Tam metin için cihaz satırındaki 'Tarama hatası' sütununa bakın.", exit, statusNum };
+}
+
+function buildFailureRow(group) {
+  const row = document.createElement("div");
+  row.className = "failure-row";
+
+  const count = document.createElement("span");
+  count.className = "count";
+  count.textContent = String(group.count);
+  row.appendChild(count);
+
+  const badge = document.createElement("span");
+  badge.className = `failure-badge ${group.category}`;
+  badge.textContent = { network: "Ağ / Offline", auth: "Yetki", timeout: "Zaman aşımı", error: "Hata" }[group.category] || "Hata";
+  row.appendChild(badge);
+
+  if (group.exit !== null && group.exit !== undefined) {
+    const chip = document.createElement("span");
+    chip.className = "exit-chip";
+    chip.textContent = `exit ${group.exit}`;
+    row.appendChild(chip);
+  }
+
+  const reason = document.createElement("div");
+  reason.className = "failure-reason";
+  const label = document.createElement("div");
+  label.className = "r-label";
+  label.textContent = group.label;
+  const hint = document.createElement("div");
+  hint.className = "r-hint";
+  const sample = group.devices.slice(0, 3).join(", ");
+  hint.textContent = group.devices.length > 3
+    ? `${group.hint} · örn. ${sample} +${group.devices.length - 3}`
+    : `${group.hint} · ${sample}`;
+  reason.append(label, hint);
+  row.appendChild(reason);
+
+  const action = document.createElement("button");
+  action.type = "button";
+  action.className = "secondary";
+  action.textContent = "Bu durumu filtrele";
+  action.addEventListener("click", () => {
+    byId("fStatus").value = statusFilterNames[group.statusNum] || "Error";
+    loadData();
+    byId("inventory").scrollIntoView({ behavior: "smooth" });
+  });
+  row.appendChild(action);
+
+  return row;
+}
+
+function renderFailureSummary(data) {
+  const panel = byId("failure-summary");
+  const navLink = byId("failureNavLink");
+  const container = byId("failureGroups");
+  const failed = data.filter(device => [1, 2, 3, 4].includes(Number(device.status)));
+
+  if (failed.length === 0) {
+    panel.hidden = true;
+    if (navLink) navLink.hidden = true;
+    container.replaceChildren();
+    return;
+  }
+
+  const groups = new Map();
+  failed.forEach(device => {
+    const info = classifyFailure(device);
+    const key = `${info.category}|${info.exit ?? "-"}|${info.label}`;
+    const existing = groups.get(key) || { ...info, count: 0, devices: [] };
+    existing.count += 1;
+    existing.devices.push(device.deviceName || "?");
+    groups.set(key, existing);
+  });
+
+  const ordered = [...groups.values()].sort((a, b) => b.count - a.count);
+  const fragment = document.createDocumentFragment();
+  ordered.forEach(group => fragment.appendChild(buildFailureRow(group)));
+  container.replaceChildren(fragment);
+
+  const stamp = byId("failurePanelStamp");
+  stamp.textContent = `${failed.length} başarısız · ${ordered.length} neden`;
+  stamp.className = "panel-stamp warning";
+  panel.hidden = false;
+  if (navLink) navLink.hidden = false;
 }
 
 function renderStats(data) {
@@ -521,7 +645,7 @@ function renderDeviceRows(data, hasFilters = false) {
     appendCell(row, device.ou || "-");
     appendCell(row, device.site || "-");
     const status = deviceStatuses[Number(device.status)] || [String(device.status ?? "Bilinmiyor"), "muted"];
-    appendStatusCell(row, status[0], status[1]);
+    appendStatusCell(row, status[0], status[1], parsePsExecExit(device.errorMessage));
     appendCell(row, device.serialNumber || "-");
     appendCell(row, formatIpAddresses(device.ipAddresses));
     appendCell(

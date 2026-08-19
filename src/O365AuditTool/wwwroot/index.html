@@ -273,6 +273,25 @@
     .confirm-line { display: flex; align-items: flex-start; gap: 8px; margin: 15px 0; color: var(--ink); line-height: 1.4; }
     .confirm-line input { width: auto; min-height: auto; margin-top: 3px; }
     .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .failure-groups { display: grid; gap: 8px; }
+    .failure-row { display: flex; align-items: center; gap: 12px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 9px; background: #fbfcfc; }
+    .failure-row .count { min-width: 42px; font: 700 22px Georgia, serif; color: var(--ink); text-align: right; }
+    .failure-badge { flex: 0 0 auto; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; }
+    .failure-badge.network { background: var(--warn-soft); color: var(--warn); }
+    .failure-badge.auth { background: var(--error-soft); color: var(--error); }
+    .failure-badge.timeout { background: #e9eef7; color: #3243a8; }
+    .failure-badge.error { background: var(--error-soft); color: var(--error); }
+    .exit-chip { flex: 0 0 auto; font: 11px Consolas, monospace; padding: 2px 7px; border-radius: 6px; background: #eef3f2; color: var(--muted); border: 1px solid var(--border); white-space: nowrap; }
+    .failure-reason { flex: 1 1 auto; min-width: 0; }
+    .failure-reason .r-label { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+    .failure-reason .r-hint { margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .failure-row button { flex: 0 0 auto; }
+    .status-exit { display: inline-block; margin-top: 4px; font: 11px Consolas, monospace; padding: 1px 6px; border-radius: 6px; background: #eef3f2; color: var(--muted); border: 1px solid var(--border); white-space: nowrap; }
+    @media (max-width: 720px) {
+      .failure-row { flex-wrap: wrap; }
+      .failure-reason { flex-basis: 100%; order: 3; }
+      .failure-row button { flex: 1 1 100%; order: 4; }
+    }
     @keyframes spin { to { transform: rotate(360deg); } }
     @media (max-width: 900px) {
       .readiness-strip { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
@@ -309,6 +328,7 @@
       <div class="session-badge" id="sessionBadge">Windows oturumu doğrulanıyor...</div>
       <nav class="quick-nav" aria-label="Dashboard bölümleri">
         <a href="#inventory">Keşif</a>
+        <a href="#failure-summary" id="failureNavLink" hidden>Arıza özeti</a>
         <a href="#licenses">PST kapasitesi</a>
         <a href="#legacy">Legacy dosyalar</a>
         <a href="#copy-plans">Kopyalama</a>
@@ -338,6 +358,17 @@
         <li id="readinessInventory" data-state="pending">İlk envanter</li>
       </ol>
       <a class="readiness-link" href="#inventory">Keşif kapsamına git</a>
+    </section>
+
+    <section class="panel" id="failure-summary" aria-labelledby="failureTitle" hidden>
+      <div class="section-head">
+        <div>
+          <h2 id="failureTitle">Arıza özeti</h2>
+          <p>Başarısız cihazlar tam hata nedenine ve PsExec çıkış koduna göre gruplanır. Yüzlerce satırı taramadan kök nedeni görün: ağ/SMB erişimi mi, yetki reddi mi, zaman aşımı mı?</p>
+        </div>
+        <span class="panel-stamp" id="failurePanelStamp" aria-live="polite">-</span>
+      </div>
+      <div class="failure-groups" id="failureGroups"></div>
     </section>
 
     <section class="panel" id="inventory" aria-labelledby="deviceTitle" aria-busy="true" data-state="loading">
