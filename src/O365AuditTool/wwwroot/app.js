@@ -152,7 +152,8 @@ async function loadSession() {
     const authenticationType = String(session.authenticationType || "Negotiate");
     const normalizedType = authenticationType.toLowerCase();
     const roles = Array.isArray(session.roles) && session.roles.length ? ` · ${session.roles.join(", ")}` : "";
-    badge.textContent = `${session.userName || "Windows kullanıcısı"} · ${authenticationType}${roles}`;
+    const version = session.appVersion ? ` · v${session.appVersion}` : "";
+    badge.textContent = `${session.userName || "Windows kullanıcısı"} · ${authenticationType}${roles}${version}`;
     badge.className = "session-badge";
     if (normalizedType.includes("kerberos")) {
       badge.classList.add("kerberos");
@@ -567,9 +568,27 @@ function renderFailureSummary(data) {
   ordered.forEach(group => fragment.appendChild(buildFailureRow(group)));
   container.replaceChildren(fragment);
 
+  // Show how old the underlying scan data is. The panel is rendered on page load, so a
+  // load timestamp would wrongly suggest the rows are fresh.
+  const collectedTimes = failed
+    .map(device => new Date(device.collectedUtc).getTime())
+    .filter(time => Number.isFinite(time));
+  const newestCollected = collectedTimes.length ? new Date(Math.max(...collectedTimes)) : null;
+
   const stamp = byId("failurePanelStamp");
-  stamp.textContent = `${failed.length} başarısız · ${ordered.length} neden`;
+  stamp.textContent = newestCollected
+    ? `${failed.length} başarısız · ${ordered.length} neden · veri: ${newestCollected.toLocaleString("tr-TR")}`
+    : `${failed.length} başarısız · ${ordered.length} neden`;
   stamp.className = "panel-stamp warning";
+
+  // Every failure recorded by v1.2.2+ carries an exit code. If none do, these rows predate
+  // the running build and no scan has been run since the upgrade.
+  const staleNotice = byId("failureStaleNotice");
+  const anyExitCode = ordered.some(group => group.exit !== null && group.exit !== undefined);
+  if (staleNotice) {
+    staleNotice.hidden = anyExitCode;
+  }
+
   panel.hidden = false;
   if (navLink) navLink.hidden = false;
 }

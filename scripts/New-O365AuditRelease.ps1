@@ -123,6 +123,8 @@ try {
         -c Release `
         -r $Runtime `
         --self-contained true `
+        -p:Version=$Version `
+        -p:InformationalVersion=$Version `
         -p:PublishSingleFile=false `
         -p:PublishTrimmed=false `
         -p:DebugType=None `

@@ -233,7 +233,8 @@ app.MapGet("/api/security/session", async (HttpContext context, IAuthorizationSe
         userName = context.User.Identity?.Name,
         authenticationType = context.User.Identity?.AuthenticationType,
         isAuthenticated = context.User.Identity?.IsAuthenticated == true,
-        roles
+        roles,
+        appVersion = AppVersion.Current
     });
 })
     .RequireAuthorization("AuditReader");
