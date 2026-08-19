@@ -12,7 +12,8 @@ public record CollectResult(
     CollectorPayload? Payload,
     string? ErrorMessage,
     bool IsOffline,
-    bool IsTimedOut = false);
+    bool IsTimedOut = false,
+    int? ExitCode = null);
 
 public interface IRemoteCollectorRunner
 {
@@ -104,9 +105,14 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
 
             if (process.ExitCode != 0)
             {
-                var error = string.IsNullOrWhiteSpace(stderr) ? "PsExec command failed." : stderr.Trim();
-                var offline = IsOfflineFailure(process.ExitCode, error);
-                return new CollectResult(false, null, error, offline);
+                // PsExec surfaces the true failure reason in different streams across
+                // versions, so classify and persist stdout as well as stderr. The exit
+                // code is kept in the message so operators can prove the exact failure
+                // (e.g. 53 network path vs 5 access denied) from the dashboard alone.
+                var detail = ComposeFailureDetail(stdout, stderr);
+                var offline = IsOfflineFailure(process.ExitCode, detail);
+                var error = $"PsExec exit {process.ExitCode}: {detail}";
+                return new CollectResult(false, null, error, offline, ExitCode: process.ExitCode);
             }
 
             var json = ExtractJsonObject(stdout);
@@ -159,6 +165,32 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
             logger.LogWarning(ex, "Failed to kill timed-out PsExec process for {Device}", deviceName);
         }
     }
+
+    internal static string ComposeFailureDetail(string? stdout, string? stderr)
+    {
+        const int maxStreamLength = 1500;
+        var err = stderr?.Trim();
+        var @out = stdout?.Trim();
+        var hasErr = !string.IsNullOrWhiteSpace(err);
+        var hasOut = !string.IsNullOrWhiteSpace(@out);
+
+        if (hasErr && hasOut)
+        {
+            return $"{Bound(err!, maxStreamLength)} | stdout: {Bound(@out!, maxStreamLength)}";
+        }
+        if (hasErr)
+        {
+            return Bound(err!, maxStreamLength);
+        }
+        if (hasOut)
+        {
+            return $"stdout: {Bound(@out!, maxStreamLength)}";
+        }
+        return "PsExec produced no diagnostic output.";
+    }
+
+    private static string Bound(string value, int maxLength) =>
+        value.Length <= maxLength ? value : value[..maxLength];
 
     internal static bool IsOfflineFailure(int exitCode, string error)
     {

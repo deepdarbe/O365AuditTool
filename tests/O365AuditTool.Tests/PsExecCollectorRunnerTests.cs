@@ -24,6 +24,35 @@ public class PsExecCollectorRunnerTests
     }
 
     [Fact]
+    public void ComposeFailureDetail_PrefersStderrAndAppendsStdout()
+    {
+        var detail = PsExecCollectorRunner.ComposeFailureDetail(
+            "collector diagnostic line",
+            "Couldn't access PC-01: Access is denied.");
+
+        Assert.StartsWith("Couldn't access PC-01: Access is denied.", detail);
+        Assert.Contains("stdout: collector diagnostic line", detail, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null, null, "PsExec produced no diagnostic output.")]
+    [InlineData("   ", "", "PsExec produced no diagnostic output.")]
+    public void ComposeFailureDetail_FallsBackWhenBothStreamsEmpty(string? stdout, string? stderr, string expected)
+    {
+        Assert.Equal(expected, PsExecCollectorRunner.ComposeFailureDetail(stdout, stderr));
+    }
+
+    [Fact]
+    public void ComposeFailureDetail_UsesStdoutWhenStderrEmpty()
+    {
+        var detail = PsExecCollectorRunner.ComposeFailureDetail("Access is denied.", "");
+
+        Assert.Equal("stdout: Access is denied.", detail);
+        // A version that writes the reason to stdout must still classify correctly.
+        Assert.False(PsExecCollectorRunner.IsOfflineFailure(1, detail));
+    }
+
+    [Fact]
     public void TryVerifyFileHash_RejectsTamperedExecutable()
     {
         var path = Path.GetTempFileName();
