@@ -16,11 +16,16 @@ public class PsExecCollectorRunnerTests
         Assert.True(PsExecCollectorRunner.IsOfflineFailure(exitCode, error));
     }
 
-    [Fact]
-    public void IsOfflineFailure_DoesNotRetryAuthorizationFailures()
+    [Theory]
+    [InlineData(5, "Access is denied.")]
+    [InlineData(1, "Couldn't access PC-01: Access is denied.")]
+    [InlineData(5, "Erişim reddedildi.")]
+    [InlineData(5, "Erişim engellendi.")]
+    public void IsOfflineFailure_DoesNotRetryAuthorizationFailures(int exitCode, string error)
     {
-        Assert.False(PsExecCollectorRunner.IsOfflineFailure(5, "Access is denied."));
-        Assert.False(PsExecCollectorRunner.IsOfflineFailure(1, "Couldn't access PC-01: Access is denied."));
+        // Localized authorization text must classify as Error (not Offline) once the
+        // OEM console encoding delivers it intact.
+        Assert.False(PsExecCollectorRunner.IsOfflineFailure(exitCode, error));
     }
 
     [Fact]

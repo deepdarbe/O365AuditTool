@@ -11,6 +11,11 @@ using O365AuditTool.Services;
 using System.Net;
 using System.Security.Cryptography.X509Certificates;
 
+// Make OEM/ANSI code pages (e.g. CP857/CP1254 on Turkish Windows) available so the
+// collector can decode PsExec's localized console output correctly. Without this the
+// default .NET set is UTF-8/ASCII/Latin1 only and localized error markers are mangled.
+System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+
 var builder = WebApplication.CreateBuilder(args);
 builder.Host.UseWindowsService();
 

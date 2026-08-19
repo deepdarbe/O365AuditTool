@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.Options;
 using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -23,6 +24,33 @@ public interface IRemoteCollectorRunner
 public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<PsExecCollectorRunner> logger) : IRemoteCollectorRunner
 {
     private readonly CollectorOptions _options = options.Value;
+
+    // PsExec is a native console app that emits localized status/error text using the
+    // host's OEM console code page (e.g. CP857 on Turkish Windows). If .NET decodes the
+    // redirected streams with the wrong code page, localized markers such as
+    // "Erişim reddedildi" or "Ağ yolu bulunamadı" are mangled and IsOfflineFailure cannot
+    // match them. Pinning the stream encoding to the OEM code page fixes that.
+    private static readonly Encoding? ConsoleOutputEncoding = ResolveConsoleOutputEncoding();
+
+    private static Encoding? ResolveConsoleOutputEncoding()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        try
+        {
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            var oemCodePage = CultureInfo.CurrentCulture.TextInfo.OEMCodePage;
+            return oemCodePage > 0 ? Encoding.GetEncoding(oemCodePage) : null;
+        }
+        catch (Exception)
+        {
+            // Fall back to the default stream encoding rather than failing collection.
+            return null;
+        }
+    }
 
     public async Task<CollectResult> RunAsync(string deviceName, CancellationToken cancellationToken)
     {
@@ -51,6 +79,12 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
                 CreateNoWindow = true
             }
         };
+
+        if (ConsoleOutputEncoding is not null)
+        {
+            process.StartInfo.StandardOutputEncoding = ConsoleOutputEncoding;
+            process.StartInfo.StandardErrorEncoding = ConsoleOutputEncoding;
+        }
 
         process.StartInfo.ArgumentList.Add($"\\\\{deviceName}");
         process.StartInfo.ArgumentList.Add("-nobanner");
