@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$ProjectPath = "",
     [string]$PublishedAppPath = "",
@@ -427,7 +427,36 @@ function Ensure-HttpSpns {
 
         $result = @(& $setSpnPath -S $spn $AccountName 2>&1)
         if ($LASTEXITCODE -ne 0) {
-            throw "Kerberos SPN kaydedilemedi: setspn -S $spn $AccountName. Cikti: $($result -join ' '). Duplicate SPN veya AD yetkisini kontrol edin."
+            # Changing the service identity leaves the HTTP SPN on the previous account, so
+            # setspn -S refuses as a duplicate. Migrate it only when this machine's own
+            # computer account holds it -- that is the registration our own LocalSystem
+            # deployment created. Any other holder is someone else's and is never touched.
+            $ownComputerAccount = "$env:COMPUTERNAME`$"
+            $holderLines = @(& $setSpnPath -Q $spn 2>&1)
+            $holder = $holderLines |
+                Where-Object { $_ -match '^\s*CN=' } |
+                Select-Object -First 1
+            $heldByThisComputer = $holderLines |
+                Where-Object { $_ -match ("^\s*CN=" + [regex]::Escape($env:COMPUTERNAME) + ",") }
+
+            if ($heldByThisComputer -and -not $AccountName.TrimEnd('$').Equals($env:COMPUTERNAME, [StringComparison]::OrdinalIgnoreCase)) {
+                Write-Warning "SPN '$spn' bu sunucunun bilgisayar hesabinda kayitli; servis kimligi degistigi icin '$ownComputerAccount' uzerinden kaldirilip '$AccountName' hesabina tasiniyor."
+                $removal = @(& $setSpnPath -D $spn $ownComputerAccount 2>&1)
+                if ($LASTEXITCODE -ne 0) {
+                    throw "SPN '$spn' eski hesaptan kaldirilamadi: setspn -D $spn $ownComputerAccount. Cikti: $($removal -join ' ')."
+                }
+
+                $result = @(& $setSpnPath -S $spn $AccountName 2>&1)
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Kerberos SPN kaydedilemedi: setspn -S $spn $AccountName. Cikti: $($result -join ' ')."
+                }
+                continue
+            }
+
+            throw ("Kerberos SPN kaydedilemedi: setspn -S $spn $AccountName. SPN su anda '" +
+                   ($(if ($holder) { $holder.Trim() } else { 'bilinmeyen bir hesap' })) +
+                   "' uzerinde kayitli. Baska bir hesaba ait SPN otomatik tasinmaz; dogruysa once " +
+                   "'setspn -D $spn <mevcut-hesap>' ile kaldirin. Cikti: $($result -join ' ')")
         }
     }
 }
