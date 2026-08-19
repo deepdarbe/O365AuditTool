@@ -29,31 +29,27 @@ public class PsExecCollectorRunnerTests
     }
 
     [Fact]
-    public void BuildStartInfo_AllocatesAConsoleForPsExec()
+    public void BuildStartInfo_CapturesBothStreamsWithoutCreatingAWindow()
     {
-        // Regression for the all-offline incident: PsExec requires a real console.
-        // Launched from the session-0 service with CreateNoWindow=true it fails before
-        // reaching the endpoint with "Couldn't access <host>: The handle is invalid."
-        // (exit 6) — verified as SYSTEM on the customer's server, where the identical
-        // invocation with an allocated console returned exit 0. CreateNoWindow MUST stay
-        // false so CreateProcess allocates a hidden conhost for PsExec.
         var startInfo = PsExecCollectorRunner.BuildStartInfo(@"C:\tools\psexec.exe");
 
         Assert.True(startInfo.RedirectStandardInput);
         Assert.True(startInfo.RedirectStandardOutput);
         Assert.True(startInfo.RedirectStandardError);
         Assert.False(startInfo.UseShellExecute);
-        Assert.False(startInfo.CreateNoWindow);
+        Assert.True(startInfo.CreateNoWindow);
         Assert.Equal(@"C:\tools\psexec.exe", startInfo.FileName);
     }
 
     [Fact]
-    public void IsOfflineFailure_TreatsInvalidHandleAsOffline_DocumentingTheReportedSymptom()
+    public void IsOfflineFailure_TreatsInvalidHandleAsAuthorizationFailure()
     {
-        // Exit 6 with "Couldn't access" matched the generic network marker, which is why
-        // 117/118 powered-on endpoints were reported Offline instead of surfacing the real
-        // handle defect. Kept as documentation of the observed customer text.
-        Assert.True(PsExecCollectorRunner.IsOfflineFailure(
+        // Root cause of the all-offline incident. PsExec reports a failed connection or
+        // authentication as "The handle is invalid." (exit 6): on the customer domain the
+        // identical invocation succeeded as an endpoint administrator and failed this way
+        // as the management server's machine account, which could not write to ADMIN$.
+        // Classifying it as Offline retried it forever and hid the missing endpoint rights.
+        Assert.False(PsExecCollectorRunner.IsOfflineFailure(
             6,
             "Couldn't access CORELAPP:\nThe handle is invalid."));
     }

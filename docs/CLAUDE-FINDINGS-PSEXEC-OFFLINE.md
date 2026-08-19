@@ -189,3 +189,45 @@ Duzeltme: `CreateNoWindow=false` — ebeveynin konsolu olmadigindan CreateProces
 cocuga gizli bir conhost tahsis eder; yonlendirilmis stdout/stderr cikti yakalamaya
 devam eder. Regresyon testi `BuildStartInfo_AllocatesAConsoleForPsExec` bu bayragi
 kilitler.
+
+
+## NIHAI SONUC (v1.2.9): kok neden servis kimliginin endpoint yetkisi
+
+Yukaridaki "PsExec konsol gerektiriyor" tespiti **YANLISTI** ve geri alindi.
+Musteri ortaminda SYSTEM olarak yapilan kontrollu olcumler:
+
+| Kimlik | PsExec | WinRM | ADMIN$ yazma |
+|---|---|---|---|
+| `NBR\Administrator` (interaktif) | exit 0 | calisiyor | - |
+| `NBRADC$` (servis kimligi) | exit 6 | Access denied | **Access denied** |
+
+Yonlendirme matrisi (konsol sabit tutularak: yonlendirme yok / yalniz stdin /
+yalniz stdout / yalniz stderr / hepsi) **tamamen exit 6** verdi; AllocConsole da
+sonucu degistirmedi. Yani ne konsol ne yonlendirme belirleyiciydi. Tek gercek
+degisken **kimlik**: yonetim sunucusunun makine hesabi endpoint `ADMIN$`
+paylasimina yazamiyor, dolayisiyla PsExec PSEXESVC'yi kopyalayip servis
+olusturamiyor.
+
+PsExec bu durumu `"Couldn't access <host>: The handle is invalid."` (exit 6)
+diye raporluyor. Bu metin genel ag isaretcisi `couldn't access` ile eslestigi
+icin siniflandirici cihazlari **Offline** yaziyor ve sonsuza kadar yeniden
+deniyordu; gercek sebep (yetki) hicbir yerde gorunmuyordu.
+
+### Bu vakadan cikan kod duzeltmeleri
+
+- `IsOfflineFailure` artik `handle is invalid` metnini **yetki hatasi** kabul
+  ediyor: durum `Error`, retry yok.
+- `CreateNoWindow` deneyi geri alindi (olcum farksiz oldugunu gosterdi; servis
+  pencere olusturmamali).
+- `Invoke-CollectorAccessDiagnostic.ps1` artik `ADMIN$` icin **yazma** testi
+  yapiyor. Onceki `Test-Path` sadece paylasima ulasilabildigini gosteriyordu ve
+  yetkisiz bir kimlik icin bile basarili donerek bu arastirmayi yanlis yone
+  surukledi.
+
+### Operasyonel cozum
+
+Servis kimligine endpoint'lerde local Administrator yetkisi verilmelidir:
+gMSA olusturup GPO (Restricted Groups / GPP Local Users and Groups) ile audit
+kapsamindaki OU'lardaki cihazlarin yerel Administrators grubuna eklemek, sonra
+`Deploy-ManagementServer.ps1 -GmsaAccount 'DOMAIN\svcO365Audit$'` ile yeniden
+deploy etmek. `-AutoConfigure` LocalSystem sectiginde bu uyariyi zaten veriyor.

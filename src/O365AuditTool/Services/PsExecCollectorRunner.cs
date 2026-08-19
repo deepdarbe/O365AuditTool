@@ -201,14 +201,7 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
             // remote process never waits on it.
             RedirectStandardInput = true,
             UseShellExecute = false,
-            // PsExec (verified with 2.43) requires an actual console: launched from the
-            // session-0 service with CREATE_NO_WINDOW it fails before reaching the endpoint
-            // with "Couldn't access <host>: The handle is invalid." (exit 6) — reproduced as
-            // SYSTEM on the customer's server, where the same invocation with a freshly
-            // allocated console returned exit 0. With CreateNoWindow=false and no parent
-            // console, CreateProcess allocates a hidden conhost for the child while the
-            // redirected std handles still capture its output.
-            CreateNoWindow = false
+            CreateNoWindow = true
         };
 
         if (ConsoleOutputEncoding is not null)
@@ -251,6 +244,17 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
         if (error.Contains("access is denied", StringComparison.OrdinalIgnoreCase) ||
             error.Contains("erişim engellendi", StringComparison.OrdinalIgnoreCase) ||
             error.Contains("erişim reddedildi", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // PsExec reports a failed connection or authentication as
+        // "Couldn't access <host>: The handle is invalid." (exit 6). Measured on a customer
+        // domain: the same invocation succeeded as an endpoint administrator and failed this
+        // way as the management server's machine account, which could not write to the
+        // endpoint ADMIN$. It is an authorization failure, so it must classify as Error —
+        // retrying it as Offline only hides that the service identity lacks endpoint rights.
+        if (error.Contains("handle is invalid", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }

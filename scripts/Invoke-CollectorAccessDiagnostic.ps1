@@ -182,11 +182,20 @@ try {
 # --- The decisive tests: ADMIN$ and SCM as the SERVICE identity -----------
 Write-Host "`n=== ADMIN$ / SCM under service identity ===" -ForegroundColor Cyan
 
-$adminShareProbe = Invoke-AsServiceIdentity -PowerShellCommand "if (Test-Path '\\$Target\ADMIN`$') { 'ADMIN_OK' } else { 'ADMIN_DENIED' }"
-if ($adminShareProbe.Output -match 'ADMIN_OK') {
-    Add-Check -Name 'ADMIN$ reachable as service identity' -Status 'Pass' -Detail "as $networkIdentity"
+# Test-Path only proves the share can be reached, which succeeded even for an identity
+# that was NOT an endpoint administrator and sent this investigation down the wrong path.
+# PsExec has to copy PSEXESVC into ADMIN$ and create a service, so probe an actual write.
+$probeFile = "o365audit-access-probe.tmp"
+$adminWriteCommand =
+    "try { Set-Content -Path '\\$Target\ADMIN`$\$probeFile' -Value 'probe' -ErrorAction Stop; " +
+    "Remove-Item '\\$Target\ADMIN`$\$probeFile' -Force -ErrorAction SilentlyContinue; 'ADMIN_WRITE_OK' } " +
+    "catch { 'ADMIN_WRITE_DENIED: ' + `$_.Exception.Message }"
+$adminShareProbe = Invoke-AsServiceIdentity -PowerShellCommand $adminWriteCommand
+if ($adminShareProbe.Output -match 'ADMIN_WRITE_OK') {
+    Add-Check -Name 'ADMIN$ writable as service identity' -Status 'Pass' -Detail "as $networkIdentity"
 } else {
-    Add-Check -Name 'ADMIN$ reachable as service identity' -Status 'Fail' -Detail "as $networkIdentity -> $($adminShareProbe.Output)"
+    Add-Check -Name 'ADMIN$ writable as service identity' -Status 'Fail' `
+        -Detail "as $networkIdentity -> $($adminShareProbe.Output). PsExec needs write + service-create rights; grant this identity local Administrator on the endpoints (gMSA + GPO)."
 }
 
 $scmProbe = Invoke-AsServiceIdentity -PowerShellCommand "try { `$s = Get-Service -ComputerName '$Target' -Name 'RemoteRegistry' -ErrorAction Stop; 'SCM_OK' } catch { 'SCM_ERR: ' + `$_.Exception.Message }"
