@@ -166,3 +166,26 @@ Decision tree (also in `docs/DEPLOYMENT-DC.md`):
 5. Consider the privileged preflight endpoint from the handoff (DNS/445/ADMIN$/
    SCM/collector-share for one device) — the field script is its interim, manual
    equivalent.
+
+
+## GUNCELLEME (v1.2.8): dogrulanan kok neden — PsExec konsol gerektiriyor
+
+Musterinin sunucusunda SYSTEM olarak yapilan kontrollu deneyler (PsExec 2.43):
+
+| Baslatma bicimi | Sonuc |
+|---|---|
+| CreateNoWindow (mevcut kod), stdin pipe | exit 6 — handle is invalid |
+| stdin = NUL | exit 6 |
+| `-h` bayragi olmadan | exit 6 |
+| **Yeni konsol tahsis edilerek** (`cmd /c start "" /wait ...`) | **exit 0 — basarili** |
+
+Yani stdin yonlendirmesi (onceki duzeltme) yeterli degildi; PsExec calisirken gercek
+bir konsola ihtiyac duyuyor. Servis session 0'da `CREATE_NO_WINDOW` ile baslattigi
+icin cocuk surec hic konsol almiyordu ve PsExec endpoint'e ulasamadan
+"Couldn't access <host>: The handle is invalid." (exit 6) ile dusuyordu. Bu metin
+"couldn't access" ag isaretcisine takildigi icin tum cihazlar Offline raporlaniyordu.
+
+Duzeltme: `CreateNoWindow=false` — ebeveynin konsolu olmadigindan CreateProcess
+cocuga gizli bir conhost tahsis eder; yonlendirilmis stdout/stderr cikti yakalamaya
+devam eder. Regresyon testi `BuildStartInfo_AllocatesAConsoleForPsExec` bu bayragi
+kilitler.

@@ -29,19 +29,21 @@ public class PsExecCollectorRunnerTests
     }
 
     [Fact]
-    public void BuildStartInfo_RedirectsStdinSoPsExecHasAValidHandle()
+    public void BuildStartInfo_AllocatesAConsoleForPsExec()
     {
-        // Regression: without a redirected stdin, PsExec launched from the session-0
-        // service has no console handle to duplicate and fails with
-        // "Couldn't access <host>: The handle is invalid." (exit 6), which the classifier
-        // then reported as Offline for every endpoint.
+        // Regression for the all-offline incident: PsExec requires a real console.
+        // Launched from the session-0 service with CreateNoWindow=true it fails before
+        // reaching the endpoint with "Couldn't access <host>: The handle is invalid."
+        // (exit 6) — verified as SYSTEM on the customer's server, where the identical
+        // invocation with an allocated console returned exit 0. CreateNoWindow MUST stay
+        // false so CreateProcess allocates a hidden conhost for PsExec.
         var startInfo = PsExecCollectorRunner.BuildStartInfo(@"C:\tools\psexec.exe");
 
         Assert.True(startInfo.RedirectStandardInput);
         Assert.True(startInfo.RedirectStandardOutput);
         Assert.True(startInfo.RedirectStandardError);
         Assert.False(startInfo.UseShellExecute);
-        Assert.True(startInfo.CreateNoWindow);
+        Assert.False(startInfo.CreateNoWindow);
         Assert.Equal(@"C:\tools\psexec.exe", startInfo.FileName);
     }
 

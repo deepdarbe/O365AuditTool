@@ -197,16 +197,18 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
             FileName = psExecPath,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            // PsExec duplicates the caller's standard handles for the remote process. Running
-            // as a session-0 Windows service there is no console, so leaving stdin
-            // un-redirected hands PsExec an invalid handle and it fails with
-            // "Couldn't access <host>: The handle is invalid." (exit 6). That text matches the
-            // generic network markers, so every endpoint was then misreported as Offline.
-            // Redirecting stdin gives PsExec a valid pipe handle; the stream is closed
-            // immediately after start so the remote process never waits on input.
+            // PsExec needs input available; the stream is closed right after start so the
+            // remote process never waits on it.
             RedirectStandardInput = true,
             UseShellExecute = false,
-            CreateNoWindow = true
+            // PsExec (verified with 2.43) requires an actual console: launched from the
+            // session-0 service with CREATE_NO_WINDOW it fails before reaching the endpoint
+            // with "Couldn't access <host>: The handle is invalid." (exit 6) — reproduced as
+            // SYSTEM on the customer's server, where the same invocation with a freshly
+            // allocated console returned exit 0. With CreateNoWindow=false and no parent
+            // console, CreateProcess allocates a hidden conhost for the child while the
+            // redirected std handles still capture its output.
+            CreateNoWindow = false
         };
 
         if (ConsoleOutputEncoding is not null)
