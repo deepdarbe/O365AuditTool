@@ -21,6 +21,7 @@ Active Directory uyesi Windows cihazlardan agent kurmadan O365 migration envante
 - `docs/O365-ARTIFACT-COPY-ARCHITECTURE.md`: NK2/N2K kesfi ve copy plan workflow mimarisi.
 - `docs/COLLECTOR-RUNTIME-AND-DIAGNOSTICS.md`: Collector calisma akisi, offline/error siniflandirma ve teshis diyagramlari.
 - `docs/CLAUDE-FINDINGS-PSEXEC-OFFLINE.md`: "Tum cihazlar offline" olayinin kod duzeyinde analizi.
+- `docs/CLAUDE-HANDOFF-2026-08-19.md`: Vakanin kapanisi, kalan hatalar ve acik isler.
 
 ## Hizli Deployment
 
