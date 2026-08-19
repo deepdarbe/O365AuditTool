@@ -41,11 +41,22 @@ param(
     [ValidatePattern('^[A-Za-z0-9._-]+$')]
     [string]$Target,
 
-    [string]$InstallRoot = 'C:\temp\o365audit'
+    [string]$InstallRoot = 'C:\temp\o365audit',
+
+    [string]$ReportPath = 'C:\temp\psxreport.txt'
 )
 
 # Native commands write status text to stderr; 'Stop' would abort the probe.
 $ErrorActionPreference = 'Continue'
+
+# FreeConsole detaches this process from its console, after which Write-Host throws
+# ("getting console output buffer information"). Every result therefore goes to a
+# file, which is also the evidence the operator sends back.
+if (Test-Path -LiteralPath $ReportPath) { Remove-Item -LiteralPath $ReportPath -Force }
+function Write-Report {
+    param([string]$Text)
+    [IO.File]::AppendAllText($ReportPath, $Text + [Environment]::NewLine)
+}
 
 $settingsPath = Join-Path $InstallRoot 'app\appsettings.Production.json'
 if (-not (Test-Path -LiteralPath $settingsPath)) {
@@ -68,11 +79,11 @@ public static extern bool FreeConsole();
 public static extern System.IntPtr GetConsoleWindow();
 '@
 
-Write-Host "whoami : $(whoami)"
-Write-Host "psexec : $psexec ($((Get-Item $psexec).VersionInfo.FileVersion))"
-Write-Host "target : $Target"
-Write-Host "baslangic konsol handle: $([Probe.ConsoleApi]::GetConsoleWindow())"
-Write-Host ""
+Write-Report "whoami : $(whoami)"
+Write-Report "psexec : $psexec ($((Get-Item $psexec).VersionInfo.FileVersion))"
+Write-Report "target : $Target"
+Write-Report "baslangic konsol handle: $([Probe.ConsoleApi]::GetConsoleWindow())"
+Write-Report ""
 
 $escapedPath = $remoteScriptPath.Replace("'", "''")
 $inner = "`$p='$escapedPath';`$e='$remoteScriptSha256';" +
@@ -120,35 +131,34 @@ function Invoke-PipesRun {
 
     $captured = $so.Contains('COLLECTOR_PROBE_OK') -or $so.Contains('"schemaVersion"')
     $handleInvalid = ($so + "`n" + $se) -match '(?i)handle is invalid'
-    $color = if ($code -eq 0 -and $captured) { 'Green' } elseif ($code -eq 0) { 'Yellow' } else { 'Red' }
-
-    Write-Host ("{0,-16} {1,-26} exit={2,-6} cikti={3,-6} handleInvalid={4,-6} {5}" -f `
-        $Name, $Description, $code, $captured, $handleInvalid, $note) -ForegroundColor $color
+    Write-Report ("{0,-16} {1,-26} exit={2,-6} cikti={3,-6} handleInvalid={4,-6} {5}" -f `
+        $Name, $Description, $code, $captured, $handleInvalid, $note)
 
     if (-not [string]::IsNullOrWhiteSpace($se)) {
         $preview = $se.Trim()
         if ($preview.Length -gt 160) { $preview = $preview.Substring(0, 160) + ' ...' }
-        Write-Host ("                 stderr: " + ($preview -replace "`r?`n", ' | ')) -ForegroundColor DarkGray
+        Write-Report ("                 stderr: " + ($preview -replace "`r?`n", ' | '))
     }
     if ($captured -and $so.Contains('"schemaVersion"')) {
-        Write-Host ("                 payload ilk 120: " + $so.Trim().Substring(0, [Math]::Min(120, $so.Trim().Length))) -ForegroundColor DarkGray
+        Write-Report ("                 payload ilk 120: " + $so.Trim().Substring(0, [Math]::Min(120, $so.Trim().Length)))
     }
 }
 
 # --- A: no console (what the service has today) ---------------------------
 $null = [Probe.ConsoleApi]::FreeConsole()
-Write-Host "--- A: KONSOLSUZ (servisin bugunku durumu) ---" -ForegroundColor Cyan
-Write-Host "konsol handle: $([Probe.ConsoleApi]::GetConsoleWindow())"
+Write-Report "--- A: KONSOLSUZ (servisin bugunku durumu) ---"
+Write-Report "konsol handle: $([Probe.ConsoleApi]::GetConsoleWindow())"
 Invoke-PipesRun -Name 'A1-echo'      -Description 'konsolsuz, echo'      -PsExecArguments $echoArgs
 Invoke-PipesRun -Name 'A2-collector' -Description 'konsolsuz, collector' -PsExecArguments $collectorArgs
 
 # --- B: with an allocated console (the candidate fix) ---------------------
-Write-Host ""
+Write-Report ""
 $allocated = [Probe.ConsoleApi]::AllocConsole()
-Write-Host "--- B: AllocConsole (aday duzeltme) ---" -ForegroundColor Cyan
-Write-Host "AllocConsole sonucu: $allocated · konsol handle: $([Probe.ConsoleApi]::GetConsoleWindow())"
+Write-Report "--- B: AllocConsole (aday duzeltme) ---"
+Write-Report "AllocConsole sonucu: $allocated - konsol handle: $([Probe.ConsoleApi]::GetConsoleWindow())"
 Invoke-PipesRun -Name 'B1-echo'      -Description 'konsollu, echo'       -PsExecArguments $echoArgs
 Invoke-PipesRun -Name 'B2-collector' -Description 'konsollu, collector'  -PsExecArguments $collectorArgs
 
-Write-Host ""
-Write-Host "Aranan: B satirlarinda exit=0 ve cikti=True (A satirlari exit=6 kalirken)." -ForegroundColor Cyan
+Write-Report ""
+Write-Report "Aranan: B satirlarinda exit=0 ve cikti=True (A satirlari exit=6 kalirken)."
+
