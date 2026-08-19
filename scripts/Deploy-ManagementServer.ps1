@@ -547,6 +547,50 @@ function Resolve-TlsCertificateThumbprint {
     return $normalized
 }
 
+function Test-SpnEligibleAccount {
+    param([Parameter(Mandatory)][string]$AccountName)
+
+    # Computer accounts and gMSAs end with '$' and have machine-managed, automatically rotated
+    # passwords, so a service ticket for them is not crackable in practice.
+    if ($AccountName.TrimEnd().EndsWith('$')) {
+        return $true
+    }
+
+    $samAccountName = $AccountName.Split('')[-1]
+    try {
+        $account = Get-ADUser -Identity $samAccountName -Properties objectSid, memberOf -ErrorAction Stop
+    }
+    catch {
+        # Cannot prove the account is safe, so do not write an SPN to it.
+        Write-Warning "SPN uygunlugu dogrulanamadi ('$AccountName'): $($_.Exception.Message)"
+        return $false
+    }
+
+    $sid = [string]$account.objectSid
+    if ($sid -match '-500$') {
+        Write-Warning "'$AccountName' yerlesik Administrator (RID 500) hesabidir."
+        return $false
+    }
+
+    $privilegedRids = @('-512', '-519', '-518', '-544')
+    foreach ($group in @($account.memberOf)) {
+        try {
+            $groupSid = [string](Get-ADGroup -Identity $group -Properties objectSid -ErrorAction Stop).objectSid
+        }
+        catch {
+            continue
+        }
+        foreach ($rid in $privilegedRids) {
+            if ($groupSid.EndsWith($rid)) {
+                Write-Warning "'$AccountName' ayricalikli bir gruba uye ($group)."
+                return $false
+            }
+        }
+    }
+
+    return $true
+}
+
 function Ensure-HttpSpns {
     param(
         [Parameter(Mandatory)][string]$AccountName,
@@ -556,6 +600,17 @@ function Ensure-HttpSpns {
     $setSpnPath = Join-Path $env:SystemRoot 'System32\setspn.exe'
     if (-not (Test-Path -LiteralPath $setSpnPath -PathType Leaf)) {
         throw "setspn.exe bulunamadi; Kerberos HTTP SPN dogrulanamiyor."
+    }
+
+    # An SPN on a plain user account makes that account Kerberoastable: any domain user can request
+    # a service ticket for it and crack the hash offline. On a built-in Domain Admin that trades the
+    # whole domain for a dashboard convenience, so it is refused outright. gMSA and computer accounts
+    # are exempt because their passwords are machine-generated and rotated.
+    if (-not (Test-SpnEligibleAccount -AccountName $AccountName)) {
+        Write-Warning ("Kerberos HTTP SPN kaydi atlandi: '$AccountName' ayricalikli veya yonetilmeyen bir kullanici " +
+                       "hesabi. Kullanici hesabina SPN yazmak onu Kerberoastable yapar. Dashboard bu haliyle NTLM ile " +
+                       "kimlik dogrular. Kerberos icin servisi gMSA'ya tasiyin: -GmsaAccount 'NBR\svcO365Audit$'.")
+        return
     }
 
     $names = @($DnsName, $DnsName.Split('.')[0]) |
