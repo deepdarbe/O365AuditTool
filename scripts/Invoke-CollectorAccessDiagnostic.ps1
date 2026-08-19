@@ -228,21 +228,48 @@ $psexecArgs = @(
     'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded
 )
 
-$stdoutFile = New-TemporaryFile
-$stderrFile = New-TemporaryFile
+# Start-Process -PassThru (without -Wait) does not reliably populate ExitCode on Windows
+# PowerShell 5.1, which silently skipped this entire block. Drive System.Diagnostics.Process
+# directly instead — the same shape PsExecCollectorRunner.RunAsync uses.
+$spaceBearingArg = $psexecArgs | Where-Object { $_ -match '\s' } | Select-Object -First 1
+if ($null -ne $spaceBearingArg) {
+    throw "Internal error: PsExec argument contains whitespace and cannot be passed unquoted: '$spaceBearingArg'."
+}
+
+$processInfo = New-Object System.Diagnostics.ProcessStartInfo
+$processInfo.FileName = $psexec
+$processInfo.Arguments = ($psexecArgs -join ' ')
+$processInfo.UseShellExecute = $false
+$processInfo.RedirectStandardOutput = $true
+$processInfo.RedirectStandardError = $true
+$processInfo.CreateNoWindow = $true
+
+$stdout = ''
+$stderr = ''
+$exit = $null
+$proc = $null
 try {
-    $proc = Start-Process -FilePath $psexec -ArgumentList $psexecArgs -NoNewWindow -PassThru `
-        -RedirectStandardOutput $stdoutFile.FullName -RedirectStandardError $stderrFile.FullName
+    $proc = [System.Diagnostics.Process]::Start($processInfo)
+    # Read both streams concurrently so a full pipe buffer cannot deadlock the child.
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+
     if (-not $proc.WaitForExit($deviceTimeout * 1000)) {
         # Process.Kill(bool) is .NET Core only; Windows PowerShell 5.1 needs the no-arg overload.
         try { $proc.Kill() } catch { }
-        Add-Check -Name 'Collector PsExec invocation' -Status 'Fail' -Detail "Timed out after $deviceTimeout s (classified Timeout, not Offline)."
-        $exit = $null
+        Add-Check -Name 'Collector PsExec invocation' -Status 'Fail' -Detail "Timed out after $deviceTimeout s (the app classifies this as Timeout, not Offline)."
     } else {
         $exit = $proc.ExitCode
     }
-    $stdout = (Get-Content -LiteralPath $stdoutFile.FullName -Raw -ErrorAction SilentlyContinue)
-    $stderr = (Get-Content -LiteralPath $stderrFile.FullName -Raw -ErrorAction SilentlyContinue)
+
+    try { $stdout = [string]$stdoutTask.Result } catch { $stdout = '' }
+    try { $stderr = [string]$stderrTask.Result } catch { $stderr = '' }
+
+    if ($null -eq $exit) {
+        Write-Host "`n  (No exit code: the collector run timed out and was killed.)" -ForegroundColor Yellow
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) { Write-Host "  stderr: $($stderr.Trim())" }
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) { Write-Host "  stdout: $($stdout.Trim())" }
+    }
 
     if ($null -ne $exit) {
         Write-Host ""
@@ -277,7 +304,7 @@ try {
         Add-Check -Name 'Collector PsExec invocation' -Status ($(if ($exit -eq 0) { 'Pass' } else { 'Fail' })) -Detail "exit=$exit"
     }
 } finally {
-    Remove-Item -LiteralPath $stdoutFile.FullName, $stderrFile.FullName -Force -ErrorAction SilentlyContinue
+    if ($null -ne $proc) { $proc.Dispose() }
 }
 
 # --- Summary --------------------------------------------------------------
