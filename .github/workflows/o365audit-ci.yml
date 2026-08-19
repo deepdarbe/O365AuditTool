@@ -34,6 +34,11 @@ on:
       - "README.md"
       - "global.json"
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Publish a release for this version (e.g. 1.2.3). Leave empty to only run tests."
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -122,7 +127,7 @@ jobs:
           node --test .\tests\dashboard.test.mjs
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_version != '')
     needs: test
     runs-on: windows-latest
     permissions:
@@ -136,11 +141,27 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      - name: Resolve release version and tag
+        id: release_meta
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.release_version }}
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:INPUT_VERSION)) {
+            $version = $env:INPUT_VERSION.Trim().TrimStart('v')
+          } else {
+            $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          }
+          if ($version -notmatch '^[0-9A-Za-z][0-9A-Za-z.-]{0,63}$') {
+            throw "Gecersiz surum: '$version'."
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=v$version"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Build self-contained release
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          .\scripts\New-O365AuditRelease.ps1 -Version $version -OutputDirectory .\dist
+          .\scripts\New-O365AuditRelease.ps1 -Version '${{ steps.release_meta.outputs.version }}' -OutputDirectory .\dist
 
       - name: Verify release archive
         shell: pwsh
@@ -160,7 +181,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
+          $tag = '${{ steps.release_meta.outputs.tag }}'
           $assets = @(
             (Get-ChildItem .\dist\O365AuditTool-*.zip).FullName
             (Get-ChildItem .\dist\O365AuditTool-*.zip.sha256).FullName
@@ -172,5 +193,5 @@ jobs:
             # Release already exists (e.g. created from the GitHub web UI); attach/refresh assets.
             gh release upload $tag @assets --clobber
           } else {
-            gh release create $tag @assets --title "O365AuditTool $tag" --generate-notes
+            gh release create $tag @assets --title "O365AuditTool $tag" --generate-notes --target $env:GITHUB_SHA
           }
