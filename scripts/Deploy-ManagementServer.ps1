@@ -14,6 +14,19 @@ param(
     [switch]$AllowInsecureHttpDashboard,
     [switch]$AutoConfigure,
     [string]$PsExecPath = "C:\Tools\PsExec\psexec.exe",
+    # PsExec -n bounds the CONNECT phase only, never the collector run, so an unreachable endpoint
+    # releases its parallel slot instead of holding it for DeviceTimeoutSeconds. Upper bound is 600
+    # because a connect timeout that outlives the device timeout can never fire first.
+    [ValidateRange(1, 600)]
+    [int]$PsExecConnectTimeoutSeconds = 30,
+    # [bool], not [switch]: the service default is TRUE and an omitted switch binds FALSE, so a
+    # redeploy without the flag would write ReachabilityProbeEnabled=false and turn the probe off --
+    # exactly how the 2026-08 "117 offline" incident produced inferred instead of measured Offline.
+    [bool]$ReachabilityProbeEnabled = $true,
+    [ValidateRange(1, 65535)]
+    [int]$ReachabilityProbePort = 445,
+    [ValidateRange(1, 60)]
+    [int]$ReachabilityProbeTimeoutSeconds = 5,
     [string]$CollectorSharePath = "",
     [string]$CollectorShareName = "o365audit",
     [string]$DomainComputersGroup = "",
@@ -22,6 +35,11 @@ param(
     [string]$DefaultSiteFilter = "",
     [string[]]$ExcludeDeviceNames = @(),
     [string[]]$ExcludeOus = @(),
+    # Both default TRUE in CollectorOptions, so both are [bool] and not [switch]: an omitted switch
+    # binds FALSE, which would pull every server and domain controller back into the nightly scan on
+    # the first redeploy that forgot the flag. -ExcludeServerOperatingSystems $false opts out.
+    [bool]$ExcludeServerOperatingSystems = $true,
+    [bool]$ExcludeDomainControllers = $true,
     # Domain-joined appliances (Synology/NAS, Samba) carry an empty operatingSystem attribute and can
     # never run the collector. Off by default because a blank attribute is a hint, not proof: a real but
     # never-booted workstation looks identical. Turn it on once the appliances are identified.
@@ -98,6 +116,56 @@ function Get-ObjectPathValue {
     }
     if ($null -eq $current) { return $DefaultValue }
     return $current
+}
+
+# A preserved value comes from a file an operator can hand-edit, so it is validated on the way IN.
+# Without this a corrupted appsettings.Production.json would be read and written back unchanged, and
+# an out-of-range timeout would only surface as a runtime options-binding failure on the service.
+function Resolve-PreservedInt {
+    param(
+        [object]$InputObject,
+        [string[]]$Path,
+        [int]$DefaultValue,
+        [Parameter(Mandatory)][int]$Minimum,
+        [Parameter(Mandatory)][int]$Maximum
+    )
+
+    $rawValue = Get-ObjectPathValue $InputObject $Path $DefaultValue
+    $settingName = $Path -join ':'
+    $parsedValue = 0
+    if (-not [int]::TryParse([string]$rawValue, [ref]$parsedValue)) {
+        throw "Mevcut ayarlardaki '$settingName' degeri tam sayi olmalidir: '$rawValue'."
+    }
+    if ($parsedValue -lt $Minimum -or $parsedValue -gt $Maximum) {
+        throw ("Mevcut ayarlardaki '$settingName' degeri $Minimum..$Maximum araliginda olmalidir: $parsedValue. " +
+               "appsettings.Production.json dosyasini duzeltin veya -$($Path[-1]) parametresi ile gecerli bir deger verin.")
+    }
+
+    return $parsedValue
+}
+
+function Resolve-PreservedBool {
+    param(
+        [object]$InputObject,
+        [string[]]$Path,
+        [bool]$DefaultValue
+    )
+
+    # [bool]"false" is $true in PowerShell: every non-empty string casts to true. A hand-edited
+    # appsettings.Production.json that stores "false" as a STRING would therefore be read back as
+    # enabled, silently flipping a setting the operator deliberately turned off.
+    $rawValue = Get-ObjectPathValue $InputObject $Path $DefaultValue
+    if ($rawValue -is [bool]) {
+        return $rawValue
+    }
+    $settingName = $Path -join ':'
+    $parsedValue = $false
+    if (-not [bool]::TryParse([string]$rawValue, [ref]$parsedValue)) {
+        throw ("Mevcut ayarlardaki '$settingName' degeri true veya false olmalidir: '$rawValue'. " +
+               "appsettings.Production.json dosyasini duzeltin veya -$($Path[-1]) parametresi ile gecerli bir deger verin.")
+    }
+
+    return $parsedValue
 }
 
 function Assert-NoReparsePointInPath {
@@ -1502,7 +1570,19 @@ if ($null -ne $existingProductionSettings) {
         $TlsCertificateThumbprint = [string](Get-ObjectPathValue $existingProductionSettings @('Server', 'TlsCertificateThumbprint') $TlsCertificateThumbprint)
     }
     if (-not $PSBoundParameters.ContainsKey('AllowInsecureHttpDashboard')) {
-        $AllowInsecureHttpDashboard = [bool](Get-ObjectPathValue $existingProductionSettings @('Server', 'AllowInsecureHttp') $false)
+        $AllowInsecureHttpDashboard = Resolve-PreservedBool $existingProductionSettings @('Server', 'AllowInsecureHttp') $false
+    }
+    if (-not $PSBoundParameters.ContainsKey('PsExecConnectTimeoutSeconds')) {
+        $PsExecConnectTimeoutSeconds = Resolve-PreservedInt $existingProductionSettings @('Collector', 'PsExecConnectTimeoutSeconds') $PsExecConnectTimeoutSeconds -Minimum 1 -Maximum 600
+    }
+    if (-not $PSBoundParameters.ContainsKey('ReachabilityProbeEnabled')) {
+        $ReachabilityProbeEnabled = Resolve-PreservedBool $existingProductionSettings @('Collector', 'ReachabilityProbeEnabled') $ReachabilityProbeEnabled
+    }
+    if (-not $PSBoundParameters.ContainsKey('ReachabilityProbePort')) {
+        $ReachabilityProbePort = Resolve-PreservedInt $existingProductionSettings @('Collector', 'ReachabilityProbePort') $ReachabilityProbePort -Minimum 1 -Maximum 65535
+    }
+    if (-not $PSBoundParameters.ContainsKey('ReachabilityProbeTimeoutSeconds')) {
+        $ReachabilityProbeTimeoutSeconds = Resolve-PreservedInt $existingProductionSettings @('Collector', 'ReachabilityProbeTimeoutSeconds') $ReachabilityProbeTimeoutSeconds -Minimum 1 -Maximum 60
     }
     if (-not $PSBoundParameters.ContainsKey('DefaultOuFilter')) {
         $DefaultOuFilter = [string](Get-ObjectPathValue $existingProductionSettings @('Collector', 'DefaultOuFilter') $DefaultOuFilter)
@@ -1519,8 +1599,14 @@ if ($null -ne $existingProductionSettings) {
     if (-not $PSBoundParameters.ContainsKey('ExcludeOus')) {
         $ExcludeOus = @(Get-ObjectPathValue $existingProductionSettings @('Collector', 'ExcludeOus') @())
     }
+    if (-not $PSBoundParameters.ContainsKey('ExcludeServerOperatingSystems')) {
+        $ExcludeServerOperatingSystems = Resolve-PreservedBool $existingProductionSettings @('Collector', 'ExcludeServerOperatingSystems') $ExcludeServerOperatingSystems
+    }
+    if (-not $PSBoundParameters.ContainsKey('ExcludeDomainControllers')) {
+        $ExcludeDomainControllers = Resolve-PreservedBool $existingProductionSettings @('Collector', 'ExcludeDomainControllers') $ExcludeDomainControllers
+    }
     if (-not $script:ExcludeUnknownOperatingSystemExplicitlySupplied) {
-        $ExcludeUnknownOperatingSystem = [bool](Get-ObjectPathValue $existingProductionSettings @('Collector', 'ExcludeUnknownOperatingSystem') $false)
+        $ExcludeUnknownOperatingSystem = Resolve-PreservedBool $existingProductionSettings @('Collector', 'ExcludeUnknownOperatingSystem') $false
     }
     if (-not $PSBoundParameters.ContainsKey('CollectorShareName')) {
         $existingRemoteScriptPath = [string](Get-ObjectPathValue $existingProductionSettings @('Collector', 'RemoteScriptPath') '')
@@ -1544,7 +1630,7 @@ if ($null -ne $existingProductionSettings) {
         $MigrationPlannerGroups = @(Get-ObjectPathValue $existingProductionSettings @('Auth', 'RoleMappings', 'MigrationPlanner') @())
     }
     if (-not $EnableArtifactCopy -and -not $DisableArtifactCopy) {
-        $effectiveArtifactCopyEnabled = [bool](Get-ObjectPathValue $existingProductionSettings @('Copy', 'Enabled') $false)
+        $effectiveArtifactCopyEnabled = Resolve-PreservedBool $existingProductionSettings @('Copy', 'Enabled') $false
     }
     if (-not $PSBoundParameters.ContainsKey('CopyTargetRoot')) {
         $CopyTargetRoot = [string](Get-ObjectPathValue $existingProductionSettings @('Copy', 'DefaultTargetRoot') $CopyTargetRoot)
@@ -1556,7 +1642,7 @@ if ($null -ne $existingProductionSettings) {
         $AllowedCopySourceUncRoots = @(Get-ObjectPathValue $existingProductionSettings @('Copy', 'AllowedSourceUncRoots') @())
     }
     if (-not $CopyVerifySha256 -and -not $DisableCopySha256) {
-        $effectiveCopyVerifySha256 = [bool](Get-ObjectPathValue $existingProductionSettings @('Copy', 'VerifySha256') $true)
+        $effectiveCopyVerifySha256 = Resolve-PreservedBool $existingProductionSettings @('Copy', 'VerifySha256') $true
     }
 
     $identityWasProvided =
@@ -1601,6 +1687,21 @@ if ($CollectorShareName -notmatch '^[A-Za-z0-9_-]+$') {
 }
 if ($ServiceName -notmatch '^[A-Za-z0-9_.-]+$') {
     throw "ServiceName yalnizca harf, rakam, nokta, alt cizgi ve tire icerebilir."
+}
+
+# DeviceTimeoutSeconds is not an operator parameter, but the connect timeout only means anything
+# relative to it, so the preserved value is resolved once here and reused by the guard below, by the
+# Collector settings and by the summary output.
+$effectiveDeviceTimeoutSeconds = Resolve-PreservedInt $existingProductionSettings @('Collector', 'DeviceTimeoutSeconds') 300 -Minimum 1 -Maximum 86400
+if ($PsExecConnectTimeoutSeconds -ge $effectiveDeviceTimeoutSeconds) {
+    throw ("PsExecConnectTimeoutSeconds ($PsExecConnectTimeoutSeconds sn) DeviceTimeoutSeconds ($effectiveDeviceTimeoutSeconds sn) degerinden kucuk olmalidir. " +
+           "Aksi halde connect zaman asimi hicbir zaman once tetiklenmez ve erisilemeyen cihaz paralel slotu tam sure boyunca isgal eder. " +
+           "Ornek: -PsExecConnectTimeoutSeconds 30")
+}
+if ($ReachabilityProbeEnabled -and $ReachabilityProbeTimeoutSeconds -ge $PsExecConnectTimeoutSeconds) {
+    throw ("ReachabilityProbeTimeoutSeconds ($ReachabilityProbeTimeoutSeconds sn) PsExecConnectTimeoutSeconds ($PsExecConnectTimeoutSeconds sn) degerinden kucuk olmalidir. " +
+           "Prob, PsExec slotu harcanmadan once ucuz eleme yapmak icindir; connect zaman asimi kadar surerse amacini kaybeder. " +
+           "Ornek: -ReachabilityProbeTimeoutSeconds 5")
 }
 
 Ensure-EventLogSource -SourceName $eventLogSourceName
@@ -1881,7 +1982,11 @@ try {
             PsExecSha256 = $managedPsExecHash
             RemoteScriptPath = "\\$env:COMPUTERNAME\$CollectorShareName\collector.ps1"
             RemoteScriptSha256 = $collectorDestinationHash.ToUpperInvariant()
-            DeviceTimeoutSeconds = [int](Get-ObjectPathValue $existingProductionSettings @('Collector', 'DeviceTimeoutSeconds') 300)
+            DeviceTimeoutSeconds = $effectiveDeviceTimeoutSeconds
+            PsExecConnectTimeoutSeconds = $PsExecConnectTimeoutSeconds
+            ReachabilityProbeEnabled = [bool]$ReachabilityProbeEnabled
+            ReachabilityProbePort = $ReachabilityProbePort
+            ReachabilityProbeTimeoutSeconds = $ReachabilityProbeTimeoutSeconds
             MaxDeviceParallelism = [int](Get-ObjectPathValue $existingProductionSettings @('Collector', 'MaxDeviceParallelism') 4)
             JobPollingSeconds = [int](Get-ObjectPathValue $existingProductionSettings @('Collector', 'JobPollingSeconds') 10)
             DailyRunHour = [int](Get-ObjectPathValue $existingProductionSettings @('Collector', 'DailyRunHour') 2)
@@ -1893,6 +1998,8 @@ try {
             DefaultSiteFilter = $DefaultSiteFilter.Trim()
             ExcludeDeviceNames = $resolvedExcludeDeviceNames
             ExcludeOus = $resolvedExcludeOus
+            ExcludeServerOperatingSystems = [bool]$ExcludeServerOperatingSystems
+            ExcludeDomainControllers = [bool]$ExcludeDomainControllers
             ExcludeUnknownOperatingSystem = [bool]$ExcludeUnknownOperatingSystem
         }
         Copy = @{
@@ -2033,6 +2140,16 @@ Write-Host "Tarama kapsami: OU='$($DefaultOuFilter.Trim())' Site='$($DefaultSite
 if ($resolvedExcludeDeviceNames.Count -gt 0 -or $resolvedExcludeOus.Count -gt 0) {
     Write-Host "Haric tutulan cihazlar: $($resolvedExcludeDeviceNames -join ', ')" -ForegroundColor Cyan
     Write-Host "Haric tutulan OU'lar: $($resolvedExcludeOus -join ', ')" -ForegroundColor Cyan
+}
+Write-Host ("Haric tutulan sistem siniflari: SunucuOS=$([bool]$ExcludeServerOperatingSystems) " +
+            "DomainController=$([bool]$ExcludeDomainControllers) BilinmeyenOS=$([bool]$ExcludeUnknownOperatingSystem)") -ForegroundColor Cyan
+Write-Host "Collector zaman asimlari: cihaz=$effectiveDeviceTimeoutSeconds sn, psexec-connect=$PsExecConnectTimeoutSeconds sn" -ForegroundColor Cyan
+if ($ReachabilityProbeEnabled) {
+    Write-Host "Erisilebilirlik probu: acik (TCP $ReachabilityProbePort, $ReachabilityProbeTimeoutSeconds sn)" -ForegroundColor Cyan
+}
+else {
+    Write-Host ("Erisilebilirlik probu: KAPALI. Erisilemeyen cihaz PsExec slotu harcar ve Offline sinifi " +
+                "olculmus degil cikarsanmis olur.") -ForegroundColor Yellow
 }
 if ($effectiveArtifactCopyEnabled) {
     Write-Host "Artifact copy: ENABLED -> $resolvedCopyTargetRoot (SHA256: $effectiveCopyVerifySha256)" -ForegroundColor Yellow

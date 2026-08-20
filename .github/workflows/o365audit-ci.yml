@@ -8,19 +8,11 @@ on:
       - ".github/workflows/o365audit-ci.yml"
       - "docs/DEPLOYMENT-DC.md"
       - "docs/O365-ARTIFACT-COPY-ARCHITECTURE.md"
-      - "scripts/collector.ps1"
-      - "scripts/Deploy-ManagementServer.ps1"
-      - "scripts/Get-O365AuditDiagnostics.ps1"
-      - "scripts/Install-O365AuditTool.ps1"
-      - "scripts/Invoke-CollectorAccessDiagnostic.ps1"
-      - "scripts/Invoke-ManualScan.ps1"
-      - "scripts/New-O365AuditRelease.ps1"
-      - "scripts/Test-PsExecLaunchModes.ps1"
-      - "scripts/Test-O365AuditRelease.ps1"
-      - "scripts/Test-O365AuditSmoke.ps1"
+      # Whole directories instead of a hand-maintained file list: a newly added script or test
+      # used to skip CI entirely on push, because it was not named here.
+      - "scripts/**"
       - "src/O365AuditTool/**"
-      - "tests/O365AuditTool.Tests/**"
-      - "tests/dashboard.test.mjs"
+      - "tests/**"
       - "README.md"
       - "global.json"
   pull_request:
@@ -30,8 +22,7 @@ on:
       - "docs/O365-ARTIFACT-COPY-ARCHITECTURE.md"
       - "scripts/**"
       - "src/O365AuditTool/**"
-      - "tests/O365AuditTool.Tests/**"
-      - "tests/dashboard.test.mjs"
+      - "tests/**"
       - "README.md"
       - "global.json"
   workflow_dispatch:
@@ -56,7 +47,11 @@ jobs:
 
       - name: Restore
         shell: pwsh
-        run: dotnet restore .\tests\O365AuditTool.Tests\O365AuditTool.Tests.csproj '-warnaserror:NU1901;NU1902;NU1903;NU1904'
+        run: |
+          # The product project is restored on its own line so the vulnerability audit applies to
+          # its direct dependencies, not only to whatever surfaces transitively under the tests.
+          dotnet restore .\src\O365AuditTool\O365AuditTool.csproj '-warnaserror:NU1901;NU1902;NU1903;NU1904'
+          dotnet restore .\tests\O365AuditTool.Tests\O365AuditTool.Tests.csproj '-warnaserror:NU1901;NU1902;NU1903;NU1904'
 
       - name: Test
         shell: pwsh
@@ -64,70 +59,377 @@ jobs:
 
       - name: Audit NuGet dependencies
         shell: pwsh
-        run: dotnet list .\tests\O365AuditTool.Tests\O365AuditTool.Tests.csproj package --vulnerable --include-transitive --no-restore
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $projects = @(
+            '.\src\O365AuditTool\O365AuditTool.csproj',
+            '.\tests\O365AuditTool.Tests\O365AuditTool.Tests.csproj'
+          )
+          $vulnerable = $false
+          foreach ($project in $projects) {
+            $report = dotnet list $project package --vulnerable --include-transitive --no-restore |
+              Out-String
+            $report
+            # "dotnet list package --vulnerable" reports findings on stdout and still exits 0, so
+            # the step used to pass whatever it printed. Keyed on the clean sentence rather than on
+            # the finding sentence, so a reworded SDK report fails loudly instead of slipping past.
+            if ($report -match 'vulnerable packages' -and $report -notmatch 'has no vulnerable packages') {
+              $vulnerable = $true
+            }
+          }
+          if ($vulnerable) {
+            '::error title=Vulnerable NuGet packages::See the report above.'
+            exit 1
+          }
 
       - name: Verify dotnet formatting
         shell: pwsh
-        run: dotnet format .\tests\O365AuditTool.Tests\O365AuditTool.Tests.csproj --verify-no-changes --no-restore
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Running this on the tests project alone logged "Skipping referenced project
+          # O365AuditTool" and verified nothing in the product code. Each project is now passed
+          # explicitly, because dotnet format never descends into project references.
+          # $ErrorActionPreference does not apply to native commands, and the pwsh shell exits with
+          # the LAST command's code, so a failure in any but the final line would pass unnoticed.
+          dotnet format .\src\O365AuditTool\O365AuditTool.csproj --verify-no-changes --no-restore
+          if ($LASTEXITCODE -ne 0) { throw "dotnet format failed on the product project (exit $LASTEXITCODE)." }
+          dotnet format .\tests\O365AuditTool.Tests\O365AuditTool.Tests.csproj --verify-no-changes --no-restore
+          if ($LASTEXITCODE -ne 0) { throw "dotnet format failed on the tests project (exit $LASTEXITCODE)." }
 
       - name: Verify PowerShell syntax
         shell: pwsh
         run: |
-          $files = @(
-            '.\scripts\collector.ps1',
-            '.\scripts\Deploy-ManagementServer.ps1',
-            '.\scripts\Get-O365AuditDiagnostics.ps1',
-            '.\scripts\Install-O365AuditTool.ps1',
-            '.\scripts\Invoke-CollectorAccessDiagnostic.ps1',
-            '.\scripts\Invoke-ManualScan.ps1',
-            '.\scripts\New-O365AuditRelease.ps1',
-            '.\scripts\Test-PsExecLaunchModes.ps1',
-            '.\scripts\Test-O365AuditRelease.ps1',
-            '.\scripts\Test-O365AuditSmoke.ps1'
-          )
-          foreach ($file in $files) {
+          $ErrorActionPreference = 'Stop'
+          # Enumerated instead of hand-listed: a script added to .\scripts used to escape both
+          # PowerShell gates simply by not being named in the workflow.
+          $scripts = @(Get-ChildItem -Path .\scripts -Filter *.ps1 -File -Recurse)
+          if ($scripts.Count -eq 0) {
+            throw 'No PowerShell scripts found under .\scripts; this gate would have passed by not looking.'
+          }
+          "Parsing $($scripts.Count) script(s)."
+          $failed = $false
+          foreach ($script in $scripts) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile(
-              (Resolve-Path $file),
+              $script.FullName,
               [ref]$tokens,
               [ref]$errors
             ) > $null
             if ($errors.Count -gt 0) {
-              $errors | ForEach-Object { Write-Error "$file :: $($_.Message)" }
-              exit 1
+              $relativePath = (Resolve-Path -Path $script.FullName -Relative).TrimStart('.', '\') -replace '\\', '/'
+              # Every file is parsed before failing, so one broken script does not hide the rest.
+              $errors | ForEach-Object {
+                "::error file=$relativePath,line=$($_.Extent.StartLineNumber)::$($_.Message)"
+              }
+              $failed = $true
             }
           }
+          if ($failed) { exit 1 }
 
       - name: Analyze PowerShell
         shell: pwsh
+        env:
+          PSSA_VERSION: "1.24.0"
         run: |
-          Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Repository PSGallery -Force
-          $files = @(
-            '.\scripts\collector.ps1',
-            '.\scripts\Deploy-ManagementServer.ps1',
-            '.\scripts\Get-O365AuditDiagnostics.ps1',
-            '.\scripts\Install-O365AuditTool.ps1',
-            '.\scripts\Invoke-CollectorAccessDiagnostic.ps1',
-            '.\scripts\Invoke-ManualScan.ps1',
-            '.\scripts\New-O365AuditRelease.ps1',
-            '.\scripts\Test-PsExecLaunchModes.ps1',
-            '.\scripts\Test-O365AuditRelease.ps1',
-            '.\scripts\Test-O365AuditSmoke.ps1'
-          )
-          $findings = foreach ($file in $files) {
-            Invoke-ScriptAnalyzer -Path $file -Severity Error
+          $ErrorActionPreference = 'Stop'
+
+          function Write-JobSummary {
+            param([string[]]$Line)
+
+            # The summary file is a reporting channel, not a gate: never let a missing or
+            # unwritable $GITHUB_STEP_SUMMARY decide whether static analysis passed.
+            if ([string]::IsNullOrWhiteSpace($env:GITHUB_STEP_SUMMARY)) { return }
+            try {
+              $Line | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            }
+            catch {
+              "Job summary unavailable: $($_.Exception.Message)"
+            }
           }
-          if ($findings) {
-            $findings | Format-Table -AutoSize | Out-String | Write-Error
+
+          function Test-AnalyzerAvailable {
+            $required = [version]$env:PSSA_VERSION
+            $null -ne (Get-Module -ListAvailable PSScriptAnalyzer |
+              Where-Object { $_.Version -ge $required })
+          }
+
+          # A runner once failed the whole build with "Get-PackageSource: Unable to find repository
+          # 'PSGallery'" - the image had lost the default source. Reuse a preinstalled module, then
+          # re-register the default repository, then retry with backoff.
+          $installError = $null
+          if (-not (Test-AnalyzerAvailable)) {
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+                  if (Get-Command Register-PSRepository -ErrorAction SilentlyContinue) {
+                    Register-PSRepository -Default -ErrorAction Stop
+                  }
+                  elseif (Get-Command Register-PSResourceRepository -ErrorAction SilentlyContinue) {
+                    Register-PSResourceRepository -PSGallery -ErrorAction Stop
+                  }
+                }
+                Install-Module PSScriptAnalyzer `
+                  -RequiredVersion $env:PSSA_VERSION `
+                  -Scope CurrentUser `
+                  -Repository PSGallery `
+                  -Force `
+                  -ErrorAction Stop
+                $installError = $null
+                break
+              }
+              catch {
+                $installError = $_
+                "PSScriptAnalyzer install attempt $attempt failed: $($_.Exception.Message)"
+                Start-Sleep -Seconds (5 * $attempt)
+              }
+            }
+          }
+
+          if (-not (Test-AnalyzerAvailable)) {
+            $reason = if ($installError) { $installError.Exception.Message } else { 'unknown' }
+            $message = "PSScriptAnalyzer $env:PSSA_VERSION unavailable; PowerShell static analysis was SKIPPED. Reason: $reason"
+            # A gallery outage must not fail the build, but it must never look like a pass either:
+            # the skip is annotated and written to the job summary.
+            "::warning title=PowerShell analysis skipped::$message"
+            Write-JobSummary @(
+              '> [!WARNING]',
+              '> **PowerShell static analysis was SKIPPED (PSGallery unavailable).**',
+              '>',
+              "> $reason"
+            )
+            if ($env:GITHUB_REF_TYPE -eq 'tag') {
+              throw "A release must not be published from an unanalyzed tree. $message"
+            }
+            exit 0
+          }
+
+          $scripts = @(Get-ChildItem -Path .\scripts -Filter *.ps1 -File -Recurse)
+          if ($scripts.Count -eq 0) {
+            throw 'No PowerShell scripts found under .\scripts; this gate would have passed by not looking.'
+          }
+
+          # The gate ran at -Severity Error, and not one script in this repository produces an
+          # Error, so it passed without looking. It now runs at Error+Warning. The rules below are
+          # the ones already firing on 2026-08-20 (121 findings when this list was written),
+          # accepted as a named baseline so raising the bar does not fail the build on day one.
+          # The baseline keys on rule names, never on counts, so ordinary script churn cannot flip
+          # it. Any rule outside this list - including every Warning rule that is silent today -
+          # fails the build.
+          $acceptedRules = [ordered]@{
+            PSAvoidUsingWriteHost                       = 'Operator-facing console scripts: the console output is the deliverable.'
+            PSUseApprovedVerbs                          = 'Local helpers inside stand-alone scripts, not an exported module contract.'
+            PSUseSingularNouns                          = 'Same: helper names are not a module contract.'
+            PSUseShouldProcessForStateChangingFunctions = 'Debt: install/deploy helpers gate on their own switches instead of -WhatIf.'
+            PSAvoidUsingEmptyCatchBlock                 = 'Debt: deliberate best-effort probes, shrink before removing the entry.'
+            PSReviewUnusedParameter                     = 'Fires on parameters that are only consumed inside script blocks.'
+            PSAvoidAssignmentToAutomaticVariable        = 'Debt.'
+            PSUseBOMForUnicodeEncodedFile               = 'Debt: matters for Windows PowerShell 5.1 readers of Turkish text.'
+          }
+
+          $findings = foreach ($script in $scripts) {
+            Invoke-ScriptAnalyzer -Path $script.FullName -Severity Error, Warning
+          }
+          $blocking = @($findings | Where-Object { -not $acceptedRules.Contains($_.RuleName) })
+          $accepted = @($findings | Where-Object { $acceptedRules.Contains($_.RuleName) })
+
+          if ($accepted.Count -gt 0) {
+            $breakdown = $accepted |
+              Group-Object RuleName |
+              Sort-Object Count -Descending |
+              ForEach-Object { '{0,5}  {1}' -f $_.Count, $_.Name }
+            "Accepted PSScriptAnalyzer baseline ($($accepted.Count) findings):"
+            $breakdown
+            # Printed to the job summary so the accepted debt stays visible instead of silent.
+            Write-JobSummary (@('### PSScriptAnalyzer accepted baseline', '', '```text') +
+              $breakdown +
+              @('```'))
+          }
+
+          $stale = @($acceptedRules.Keys | Where-Object { $_ -notin $accepted.RuleName })
+          if ($stale.Count -gt 0) {
+            "::notice title=PSScriptAnalyzer baseline shrank::These rules no longer fire and can be removed from the accepted list: $($stale -join ', ')"
+          }
+
+          if ($blocking.Count -gt 0) {
+            $blocking |
+              Format-Table -AutoSize RuleName, Severity, ScriptName, Line, Message |
+              Out-String -Width 200
+            "::error title=PSScriptAnalyzer::$($blocking.Count) blocking finding(s) outside the accepted baseline."
             exit 1
           }
 
       - name: Verify dashboard JavaScript
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          # dashboard-logic.js carries the failure classification rules and loads before app.js;
+          # it had no syntax gate at all, so a parse error would only have surfaced in a browser.
+          # app.js is only read as TEXT by the test file, never parsed, so without an explicit
+          # check here a syntax error in it reaches the browser as a blank dashboard. Each native
+          # command needs its own gate: the step exits with the LAST command's code.
+          node --check .\src\O365AuditTool\wwwroot\dashboard-logic.js
+          if ($LASTEXITCODE -ne 0) { throw 'dashboard-logic.js failed node --check.' }
           node --check .\src\O365AuditTool\wwwroot\app.js
+          if ($LASTEXITCODE -ne 0) { throw 'app.js failed node --check.' }
           node --test .\tests\dashboard.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'dashboard tests failed.' }
+
+      - name: Publish application for smoke tests
+        shell: pwsh
+        run: dotnet publish .\src\O365AuditTool\O365AuditTool.csproj -c Release --no-restore -o .\artifacts\smoke-app
+
+      - name: Smoke test published application (Development)
+        shell: pwsh
+        # Previously this ran only in the release job, so a startup regression reached a tag before
+        # anything noticed. It now runs on every push and pull request.
+        run: .\scripts\Test-O365AuditSmoke.ps1 -AppDirectory .\artifacts\smoke-app
+
+      - name: Smoke test published application (Production)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $appDirectory = (Resolve-Path .\artifacts\smoke-app).Path
+          $application = Join-Path $appDirectory 'O365AuditTool.exe'
+          $dashboardPort = 5090
+          $healthPort = 5091
+
+          function Start-SmokeApplication {
+            param([Parameter(Mandatory)][hashtable]$Environment)
+
+            $startInfo = New-Object Diagnostics.ProcessStartInfo
+            $startInfo.FileName = $application
+            $startInfo.WorkingDirectory = $appDirectory
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            foreach ($entry in $Environment.GetEnumerator()) {
+              $startInfo.EnvironmentVariables[$entry.Key] = $entry.Value
+            }
+
+            $process = New-Object Diagnostics.Process
+            $process.StartInfo = $startInfo
+            $null = $process.Start()
+            # Both pipes are drained from the moment the child starts: an unread stdout buffer
+            # blocks the process and would hang this step instead of failing it.
+            [pscustomobject]@{
+              Process = $process
+              Output  = $process.StandardOutput.ReadToEndAsync()
+              Error   = $process.StandardError.ReadToEndAsync()
+            }
+          }
+
+          function Get-HttpStatus {
+            param([Parameter(Mandatory)][string]$Uri)
+
+            try {
+              return [int](Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 5).StatusCode
+            }
+            catch {
+              if ($null -ne $_.Exception.Response) {
+                return [int]$_.Exception.Response.StatusCode
+              }
+              throw
+            }
+          }
+
+          # 1. Negative: shipped Production defaults carry no TLS thumbprint and
+          # Server:AllowInsecureHttp=false, so the host must refuse to start rather than serve the
+          # dashboard in clear text. Development skips the whole Kestrel branch, so nothing
+          # verified this guard before.
+          $logDirectory = Join-Path $appDirectory 'data\logs'
+          function Get-StartupReportName {
+            @(Get-ChildItem -Path $logDirectory -Filter 'startup-failure-*.log' -File -ErrorAction SilentlyContinue |
+              Select-Object -ExpandProperty Name)
+          }
+          # Snapshot first: an earlier step's report must not be mistaken for this one's.
+          $reportsBefore = Get-StartupReportName
+          $insecure = Start-SmokeApplication -Environment @{
+            ASPNETCORE_ENVIRONMENT = 'Production'
+            'Server__HttpsPort'    = "$dashboardPort"
+            'Server__HealthPort'   = "$healthPort"
+          }
+          if (-not $insecure.Process.WaitForExit(60000)) {
+            $insecure.Process.Kill()
+            throw 'Production start without a TLS certificate kept running: the mandatory-TLS guard is gone.'
+          }
+          $insecureError = $insecure.Error.GetAwaiter().GetResult()
+          $insecureOutput = $insecure.Output.GetAwaiter().GetResult()
+          $insecureExitCode = $insecure.Process.ExitCode
+          $insecure.Process.Dispose()
+          if ($insecureExitCode -eq 0) {
+            throw "Production start without a TLS certificate exited 0: the mandatory-TLS guard is gone. $insecureOutput"
+          }
+          if ("$insecureOutput`n$insecureError" -notmatch 'Production dashboard TLS is mandatory') {
+            throw "Production start failed for an unexpected reason (exit $insecureExitCode): $insecureError"
+          }
+          # BURCUDC went down leaving nothing an operator could read; the on-disk startup report is
+          # the fix, so the report file itself is part of the contract.
+          $newReports = @(Get-StartupReportName | Where-Object { $_ -notin $reportsBefore })
+          if ($newReports.Count -eq 0) {
+            throw "A Production startup failure produced no new startup-failure-*.log report in '$logDirectory'."
+          }
+
+          # 2. Positive: the only path that exercises ConfigureKestrel, the split dashboard/health
+          # listeners and the health-port filter. A self-signed certificate would need machine
+          # store trust the runner must not be given, so the application's own documented
+          # Server:AllowInsecureHttp exception is used instead - the anonymous 401 assertions below
+          # prove authentication is still enforced on that path.
+          $server = Start-SmokeApplication -Environment @{
+            ASPNETCORE_ENVIRONMENT      = 'Production'
+            'Server__AllowInsecureHttp' = 'true'
+            'Server__HttpsPort'         = "$dashboardPort"
+            'Server__HealthPort'        = "$healthPort"
+          }
+          try {
+            $healthStatus = 0
+            for ($attempt = 1; $attempt -le 40; $attempt++) {
+              if ($server.Process.HasExited) {
+                $stderr = $server.Error.GetAwaiter().GetResult()
+                throw "Application exited during Production startup with code $($server.Process.ExitCode). $stderr"
+              }
+
+              try {
+                $healthStatus = Get-HttpStatus -Uri "http://127.0.0.1:$healthPort/health"
+                if ($healthStatus -eq 200) { break }
+              }
+              catch {}
+              Start-Sleep -Milliseconds 500
+            }
+
+            $healthOnDashboardPort = Get-HttpStatus -Uri "http://127.0.0.1:$dashboardPort/health"
+            $dashboardAnonymousStatus = Get-HttpStatus -Uri "http://127.0.0.1:$dashboardPort/"
+            $apiAnonymousStatus = Get-HttpStatus -Uri "http://127.0.0.1:$dashboardPort/api/inventory/devices"
+            $swaggerStatus = Get-HttpStatus -Uri "http://127.0.0.1:$dashboardPort/swagger/index.html"
+
+            if (
+              $healthStatus -ne 200 -or
+              $healthOnDashboardPort -ne 404 -or
+              $dashboardAnonymousStatus -ne 401 -or
+              $apiAnonymousStatus -ne 401 -or
+              $swaggerStatus -eq 200
+            ) {
+              throw "Production smoke mismatch. health=$healthStatus healthOnDashboardPort=$healthOnDashboardPort dashboardAnonymous=$dashboardAnonymousStatus apiAnonymous=$apiAnonymousStatus swagger=$swaggerStatus"
+            }
+
+            [pscustomobject]@{
+              MandatoryTlsExitCode         = $insecureExitCode
+              NewStartupFailureReports     = $newReports.Count
+              HealthStatus                 = $healthStatus
+              HealthOnDashboardPortStatus  = $healthOnDashboardPort
+              DashboardAnonymousStatus     = $dashboardAnonymousStatus
+              ApiAnonymousStatus           = $apiAnonymousStatus
+              SwaggerStatus                = $swaggerStatus
+            }
+          }
+          finally {
+            if (-not $server.Process.HasExited) {
+              $server.Process.Kill()
+              $server.Process.WaitForExit(5000) | Out-Null
+            }
+            $server.Process.Dispose()
+          }
 
   release:
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_version != '')

@@ -20,6 +20,16 @@ param(
     [switch]$AutoConfigure,
     [string]$PsExecPath = 'C:\Tools\PsExec\PsExec64.exe',
     [bool]$DownloadPsExecIfMissing = $true,
+    # Ranges mirror Deploy-ManagementServer.ps1 so a bad value is refused here, before the bundle is
+    # downloaded and the service is stopped. [bool] and not [switch] for ReachabilityProbeEnabled:
+    # the service default is TRUE and an omitted switch would forward FALSE.
+    [ValidateRange(1, 600)]
+    [int]$PsExecConnectTimeoutSeconds = 30,
+    [bool]$ReachabilityProbeEnabled = $true,
+    [ValidateRange(1, 65535)]
+    [int]$ReachabilityProbePort = 445,
+    [ValidateRange(1, 60)]
+    [int]$ReachabilityProbeTimeoutSeconds = 5,
     [string]$CollectorSharePath = '',
     [string]$CollectorShareName = 'o365audit',
     [string]$DomainComputersGroup = "",
@@ -28,6 +38,10 @@ param(
     [string]$DefaultSiteFilter = "",
     [string[]]$ExcludeDeviceNames = @(),
     [string[]]$ExcludeOus = @(),
+    # Both default TRUE in CollectorOptions; a [switch] left off would forward FALSE and put every
+    # server and domain controller back into the nightly scan.
+    [bool]$ExcludeServerOperatingSystems = $true,
+    [bool]$ExcludeDomainControllers = $true,
     [switch]$ExcludeUnknownOperatingSystem,
     [string[]]$AuditAdminGroups = @(),
     [string[]]$AuditReaderGroups = @(),
@@ -360,6 +374,10 @@ try {
         'HealthPort',
         'DashboardDnsName',
         'TlsCertificateThumbprint',
+        'PsExecConnectTimeoutSeconds',
+        'ReachabilityProbeEnabled',
+        'ReachabilityProbePort',
+        'ReachabilityProbeTimeoutSeconds',
         'CollectorSharePath',
         'CollectorShareName',
         'DomainComputersGroup',
@@ -368,6 +386,8 @@ try {
         'DefaultSiteFilter',
         'ExcludeDeviceNames',
         'ExcludeOus',
+        'ExcludeServerOperatingSystems',
+        'ExcludeDomainControllers',
         'ExcludeUnknownOperatingSystem',
         'AuditAdminGroups',
         'AuditReaderGroups',

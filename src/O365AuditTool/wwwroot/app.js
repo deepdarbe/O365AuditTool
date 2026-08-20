@@ -476,7 +476,7 @@ async function loadData() {
 // Failure classification lives in dashboard-logic.js and is shared with the server rules in
 // PsExecCollectorRunner.IsOfflineFailure. Keeping a second copy here is what let the dashboard
 // drift and label the 2026-08 authorization incident (PsExec exit 6) as "Ağ / Offline".
-const { categoryLabels, parsePsExecExit, classifyFailure } = globalThis.O365Dashboard;
+const { categoryLabels, resolvePsExecExit, classifyFailure } = globalThis.O365Dashboard;
 
 const statusFilterNames = { 1: "Offline", 2: "Error", 3: "Partial", 4: "Timeout" };
 
@@ -494,12 +494,18 @@ function buildFailureRow(group) {
   badge.textContent = categoryLabels[group.category] || categoryLabels.error;
   row.appendChild(badge);
 
-  if (group.exit !== null && group.exit !== undefined) {
-    const chip = document.createElement("span");
-    chip.className = "exit-chip";
-    chip.textContent = `exit ${group.exit}`;
-    row.appendChild(chip);
-  }
+  // The exit code belongs in the group heading, next to the badge: it is the one token an operator
+  // can match against the server's own classification (and against the "PsExec exit N:" prefix in
+  // the error column) without reading the Turkish prose underneath. Rows that predate the stored
+  // column say so, so a missing chip is never mistaken for "the server reported no code".
+  const chip = document.createElement("span");
+  const hasExit = group.exit !== null && group.exit !== undefined;
+  chip.className = hasExit ? "exit-chip" : "exit-chip none";
+  chip.textContent = hasExit ? `PsExec exit ${group.exit}` : "PsExec exit kodu yok";
+  chip.title = hasExit
+    ? "Sunucunun kaydettiği PsExec çıkış kodu; sunucu sınıflandırmasıyla bire bir eşleşir"
+    : "Bu kayıtlarda çıkış kodu saklanmamış; sınıflandırma hata metninden çıkarıldı";
+  row.appendChild(chip);
 
   const reason = document.createElement("div");
   reason.className = "failure-reason";
@@ -544,6 +550,11 @@ function renderFailureSummary(data) {
 
   const groups = new Map();
   failed.forEach(device => {
+    // Group on the effective exit code (stored column first, message text only as fallback) plus
+    // the category, so devices stopped by the same Win32 code land in one row however their
+    // endpoint worded the error. The label stays in the key only to keep unrecognised codes apart:
+    // those fall back to the raw message, and merging them would put one device's text on all of
+    // them.
     const info = classifyFailure(device);
     const key = `${info.category}|${info.exit ?? "-"}|${info.label}`;
     const existing = groups.get(key) || { ...info, count: 0, devices: [] };
@@ -653,7 +664,7 @@ function renderDeviceRows(data, hasFilters = false) {
     appendCell(row, device.ou || "-");
     appendCell(row, device.site || "-");
     const status = deviceStatuses[Number(device.status)] || [String(device.status ?? "Bilinmiyor"), "muted"];
-    appendStatusCell(row, status[0], status[1], parsePsExecExit(device.errorMessage));
+    appendStatusCell(row, status[0], status[1], resolvePsExecExit(device));
     appendCell(row, device.serialNumber || "-");
     appendCell(row, formatIpAddresses(device.ipAddresses));
     appendCell(

@@ -282,6 +282,7 @@
     .failure-badge.timeout { background: #e9eef7; color: #3243a8; }
     .failure-badge.error { background: var(--error-soft); color: var(--error); }
     .exit-chip { flex: 0 0 auto; font: 11px Consolas, monospace; padding: 2px 7px; border-radius: 6px; background: #eef3f2; color: var(--muted); border: 1px solid var(--border); white-space: nowrap; }
+    .exit-chip.none { background: transparent; border-style: dashed; opacity: 0.75; }
     .failure-reason { flex: 1 1 auto; min-width: 0; }
     .failure-reason .r-label { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
     .failure-reason .r-hint { margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
@@ -364,7 +365,7 @@
       <div class="section-head">
         <div>
           <h2 id="failureTitle">Arıza özeti</h2>
-          <p>Başarısız cihazlar tam hata nedenine ve PsExec çıkış koduna göre gruplanır. Yüzlerce satırı taramadan kök nedeni görün: ağ/SMB erişimi mi, yetki reddi mi, zaman aşımı mı?</p>
+          <p>Başarısız cihazlar sunucunun kaydettiği PsExec çıkış koduna ve hata nedenine göre gruplanır. Yüzlerce satırı taramadan kök nedeni görün: ağ/SMB erişimi mi, yetki reddi mi, zaman aşımı mı?</p>
         </div>
         <span class="panel-stamp" id="failurePanelStamp" aria-live="polite">-</span>
       </div>

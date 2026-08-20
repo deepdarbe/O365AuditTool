@@ -1,0 +1,113 @@
+// Stand-in for psexec.exe, compiled at test time by PsExecStubExecutable with the in-box
+// .NET Framework compiler, so this file is C# 5 and is NOT part of the test assembly (hence
+// the .txt extension). PsExecCollectorRunner starts the configured binary itself with
+// UseShellExecute=false - which cannot launch a .cmd/.bat - and it owns the whole argument
+// list, so the stub can only be steered out of band: it reads a sidecar file next to itself.
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Reflection;
+using System.Threading;
+
+internal static class PsExecStubProgram
+{
+    private const string ChildMarker = "--o365audit-stub-child";
+    private static readonly TimeSpan HangDuration = TimeSpan.FromSeconds(60);
+
+    private static int Main(string[] args)
+    {
+        string executablePath = Assembly.GetExecutingAssembly().Location;
+
+        if (args.Length > 0 && args[0] == ChildMarker)
+        {
+            // Exists only to give the runner a grandchild to kill; it must not overwrite the
+            // sidecar files its parent wrote.
+            Thread.Sleep(HangDuration);
+            return 0;
+        }
+
+        // The runner never reports what it launched PsExec with, and the arguments carry the
+        // connect timeout and the hash-pinned collector command, so record them for the test.
+        File.WriteAllLines(executablePath + ".args", args);
+
+        // ".stub", never "<exe>.config": Windows parses a sibling application configuration
+        // file while it builds the activation context, and a non-XML one makes CreateProcess
+        // fail outright with "side-by-side configuration is incorrect".
+        Dictionary<string, string> configuration = ReadConfiguration(executablePath + ".stub");
+        if (configuration.ContainsKey("hang"))
+        {
+            ProcessStartInfo childStartInfo = new ProcessStartInfo(executablePath, ChildMarker);
+            childStartInfo.UseShellExecute = false;
+            childStartInfo.CreateNoWindow = true;
+            Process child = Process.Start(childStartInfo);
+
+            File.WriteAllLines(executablePath + ".pids", new string[]
+            {
+                Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture),
+                child.Id.ToString(CultureInfo.InvariantCulture)
+            });
+
+            // Longer than any DeviceTimeoutSeconds a test uses, short enough that a tree kill
+            // that failed cannot leave a process behind for the rest of the session.
+            Thread.Sleep(HangDuration);
+            return 0;
+        }
+
+        WriteStream(configuration, "stdout", true);
+        WriteStream(configuration, "stderr", false);
+        return ReadExitCode(configuration);
+    }
+
+    private static Dictionary<string, string> ReadConfiguration(string path)
+    {
+        Dictionary<string, string> configuration = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (!File.Exists(path))
+        {
+            return configuration;
+        }
+
+        foreach (string line in File.ReadAllLines(path))
+        {
+            int separator = line.IndexOf('=');
+            if (separator <= 0)
+            {
+                continue;
+            }
+
+            configuration[line.Substring(0, separator)] = line.Substring(separator + 1);
+        }
+
+        return configuration;
+    }
+
+    private static void WriteStream(Dictionary<string, string> configuration, string key, bool standardOutput)
+    {
+        string encoded;
+        if (!configuration.TryGetValue(key, out encoded) || encoded.Length == 0)
+        {
+            return;
+        }
+
+        // Raw bytes rather than Console.Write: the runner pins the stream encoding to the host
+        // OEM console code page, so the test - not this stub - decides the bytes on the wire.
+        byte[] payload = Convert.FromBase64String(encoded);
+        using (Stream stream = standardOutput ? Console.OpenStandardOutput() : Console.OpenStandardError())
+        {
+            stream.Write(payload, 0, payload.Length);
+            stream.Flush();
+        }
+    }
+
+    private static int ReadExitCode(Dictionary<string, string> configuration)
+    {
+        string value;
+        if (!configuration.TryGetValue("exit", out value))
+        {
+            return 0;
+        }
+
+        return int.Parse(value, CultureInfo.InvariantCulture);
+    }
+}
