@@ -92,6 +92,41 @@ taraniyordu.
   sureci, retry kuyrugu acligi, "-n yoklugu 300 sn slot isgal ediyor" (gercek OS
   SMB timeout'u ~20-45 sn).
 
+## 3b. NBRADC kurulumu (20 Agustos 06:11, dogrulandi)
+
+**v1.3.2 kuruldu ve calisiyor.** Kurulum sirasinda iki gercek hata ortaya cikti ve duzeltildi:
+
+1. **TLS private key cozumlenemiyor (deployment'i bloke ediyordu).** `Grant-TlsPrivateKeyRead`
+   anahtar dosyasinin yerini .NET **tipine** gore seciyordu. Olculdu: NBRADC'nin AD CS sertifikasi
+   `RSACng` olarak gorunuyor ama saglayicisi "Microsoft RSA SChannel Cryptographic Provider" —
+   yani CNG API'siyle gorunen eski CAPI anahtari; dosyasi `Crypto\RSA\MachineKeys` altinda,
+   `Crypto\Keys` altinda degil. Depolama yerini tip degil **saglayici** belirler. Artik anahtar kabi
+   adindan iki dizin de deneniyor ve hata mesaji denenen tum yollari yaziyor.
+2. **`Test-SpnEligibleAccount` DOMAIN\user ayrimini bos string ile yapiyordu** — her hesap
+   dogrulanamaz oluyordu. Fail-closed davrandigi icin guvenlik sonucu dogruydu, mesaji yanlisti.
+
+Kurulum ilk denemede **on-kontrolde** durdu: servis calismaya devam etti, uygulama dizinine
+dokunulmadi. Yani yeni teshis yolu amacina ulasti.
+
+**Kurulum sonrasi dogrulama (hepsi gecti):**
+
+| Kontrol | Sonuc |
+|---|---|
+| Surum | 1.3.2.0, servis Running, 5080/5081 dinliyor |
+| Tarama kapsami | `OU=PC,OU=NBR,DC=nbr,DC=local` |
+| Dislamalar | `OU=SERVER,DC=nbr,DC=local` · `NAS*`, `*SYNOLOGY*`, `NBR_DS*` · UnknownOS=True |
+| `startup-failure-*.log` | yok |
+| **Negatif kontrol:** Administrator uzerindeki HTTP SPN | **0** (SPN korumasi regresyonu onledi) |
+| NBRADC$ uzerindeki HTTP SPN | 2 (yerinde kaldi) |
+| Kalinti `.staging`/`.failed`/`.rollback` | yok |
+
+**Bilinen eksik:** Deploy scripti yeni Collector anahtarlarindan yalnizca ucunu yaziyor
+(`ExcludeDeviceNames`, `ExcludeOus`, `ExcludeUnknownOperatingSystem`).
+`PsExecConnectTimeoutSeconds`, `ReachabilityProbeEnabled`, `ReachabilityProbePort`,
+`ReachabilityProbeTimeoutSeconds`, `ExcludeServerOperatingSystems`, `ExcludeDomainControllers`
+appsettings'e yazilmiyor; CollectorOptions varsayilanlariyla (30 sn / probe acik) dogru calisiyorlar
+ama site bazinda ayarlanamiyorlar.
+
 ## 4. Acik isler
 
 - [ ] **Olcum kapisi**: yeni surum kuruldiktan sonra tarama calistirilip 10
