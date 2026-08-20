@@ -556,7 +556,7 @@ function Test-SpnEligibleAccount {
         return $true
     }
 
-    $samAccountName = $AccountName.Split('')[-1]
+    $samAccountName = $AccountName.Split([char]0x5C)[-1]
     try {
         $account = Get-ADUser -Identity $samAccountName -Properties objectSid, memberOf -ErrorAction Stop
     }
@@ -674,16 +674,31 @@ function Grant-TlsPrivateKeyRead {
             $key = [Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($certificate)
         }
 
-        if ($key -is [Security.Cryptography.RSACng] -or $key -is [Security.Cryptography.ECDsaCng]) {
-            $keyPath = Join-Path $env:ProgramData "Microsoft\Crypto\Keys\$($key.Key.UniqueName)"
+        # The .NET key TYPE does not determine where the key file lives. Measured on NBRADC: an AD CS
+        # issued certificate surfaces as RSACng while its provider is the legacy "Microsoft RSA SChannel
+        # Cryptographic Provider", so the file sits under Crypto\RSA\MachineKeys, not Crypto\Keys.
+        # Branching on the type therefore aborted the whole deployment on a perfectly healthy machine
+        # certificate. Resolve by container name and take whichever directory actually holds the file.
+        $containerNames = @()
+        if ($key.PSObject.Properties.Name -contains 'Key' -and $key.Key -and $key.Key.UniqueName) {
+            $containerNames += [string]$key.Key.UniqueName
         }
-        elseif ($key -is [Security.Cryptography.RSACryptoServiceProvider]) {
-            $containerName = $key.CspKeyContainerInfo.UniqueKeyContainerName
-            $keyPath = Join-Path $env:ProgramData "Microsoft\Crypto\RSA\MachineKeys\$containerName"
+        if ($key.PSObject.Properties.Name -contains 'CspKeyContainerInfo' -and $key.CspKeyContainerInfo) {
+            $containerNames += [string]$key.CspKeyContainerInfo.UniqueKeyContainerName
         }
+        $containerNames = @($containerNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
 
-        if ([string]::IsNullOrWhiteSpace($keyPath) -or -not (Test-Path -LiteralPath $keyPath -PathType Leaf)) {
-            throw "TLS private key dosyasi cozumlenemedi. Sertifikanin machine-key olarak import edildigini dogrulayin: '$Thumbprint'."
+        $candidatePaths = @()
+        foreach ($containerName in $containerNames) {
+            $candidatePaths += (Join-Path $env:ProgramData "Microsoft\Crypto\RSA\MachineKeys\$containerName")
+            $candidatePaths += (Join-Path $env:ProgramData "Microsoft\Crypto\Keys\$containerName")
+        }
+        $keyPath = $candidatePaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+
+        if ([string]::IsNullOrWhiteSpace($keyPath)) {
+            $triedText = if ($candidatePaths.Count -gt 0) { $candidatePaths -join '; ' } else { '(anahtar kabi adi okunamadi)' }
+            throw ("TLS private key dosyasi cozumlenemedi: '$Thumbprint'. Sertifikanin machine-key olarak import " +
+                   "edildigini dogrulayin. Denenen yollar: $triedText")
         }
 
         $keyAcl = Get-Acl -LiteralPath $keyPath
