@@ -1,0 +1,197 @@
+# Devir Notu — 20 Agustos 2026
+
+Onceki devir notu: [`CLAUDE-HANDOFF-2026-08-19.md`](CLAUDE-HANDOFF-2026-08-19.md).
+Tam duzeltme plani: [`FIX-PLAN-2026-08-20.md`](FIX-PLAN-2026-08-20.md).
+
+Bu oturumda 2026-03 tarihli calisan atadan (`O365-Migration-Audit`, PowerShell +
+Node) bu projeye cok-ajanli bir karsilastirma yapildi (34 bulgu dogrulandi,
+6 curutuldu), ardindan P0/P1 duzeltmeleri uygulandi.
+
+## 1. Canlida olculen yeni gercekler
+
+Bunlar 19 Agustos notunda **yoktu** ve varsayimla degil, uzaktan olcumle bulundu.
+
+| Olcum | Sonuc |
+|---|---|
+| NBRADC'de kosan surum | **v1.2.8** — 19 Agustos notunun "v1.2.9 yayinlandi" ifadesi kurulumu kapsamiyor |
+| v1.2.8 binary'sinde `handle is invalid` metni | **yok** → yetki hatalari hala `Offline` sayilip sonsuz retry ediliyor |
+| BURCUDC servis durumu | **Stopped**, uygulama dizini `.failed-db1f8b2e...`'e geri alinmis |
+| BURCUDC TLS sertifikasi | self-signed, private key var, 2028'e kadar gecerli |
+| Ayni sertifikanin deposu | `LocalMachine\CA` (ara CA) — **`Root`'ta degil** |
+| `X509Chain.Build()` | **False**, `UntrustedRoot` |
+
+**BURCUDC kok nedeni kapandi:** `Program.cs` sertifikayi
+`X509Store.Find(..., validOnly: true)` ile ariyordu; bu bayrak guvenilir zincir
+de talep eder. Sertifika `Root` yerine `CA` deposuna alindigi icin zincir
+kurulamiyor, arama bos donuyor, servis aciliyorken istisna atiyordu.
+
+**nbr.local AD yapisi (olculdu):** is istasyonlari `OU=PC,OU=NBR,DC=nbr,DC=local`
+altinda (~159 nesne). Sorunlu 5 cihazin **hepsi** `OU=SERVER` altinda:
+CORELWEB (DMZ), HYPERV, GECOPDKS, ve OS niteligi **bos** olan NASCLUSTER /
+NBRSYNOLOGY / NBR_DS1825PLUS (Synology appliance). Dagitilmis
+`DefaultOuFilter` domain koku (`DC=nbr,DC=local`) oldugu icin hepsi her gece
+taraniyordu.
+
+## 2. Bu oturumda uygulananlar
+
+### Toplama zinciri
+- **PsExec `-n` connect timeout** (`PsExecConnectTimeoutSeconds`, varsayilan 30).
+  Yalnizca CONNECT fazini sinirlar, toplayici calisma suresini degil.
+- **Olculen erisilebilirlik**: PsExec slotu harcanmadan once TCP 445 (basarisizsa
+  139) probe'u. Artik `Offline` bir *cikarim* degil, **olcum**. Baglanti reddi
+  "erisilebilir" sayilir — host cevap vermistir, sorun sonraki asamadadir.
+- **Siniflandirma artik exit-kod-oncelikli** (`IsOfflineFailure`). Onceden metin
+  once bakiliyordu; bu yuzden mesaji genel `couldn't access` iceren her yetki
+  hatasi `Offline` yazilip sonsuz retry ediliyordu — 117-offline olayinin sinifi.
+  Yetki kodlari: 5, 6, 1311, 1326, 1327, 1331, 1385, 1789.
+- **Timeout dalinda cikti korunuyor**: process oldurulduk ten sonra stdout/stderr
+  3 sn'lik siniri asmadan okunur, hangi fazda takildigi kaybolmaz.
+- **`PsExecExitCode` ayri kolon** (issue #11). Hata metnini ayristirarak gruplamak,
+  tek bir yetki hatasinin 117 cihazda "ag sorunu" gibi gorunmesine yol acmisti.
+
+### Kapsam
+- AD kesfinde **OS / DC / isim / OU dislama** (`ExcludeDeviceNames` joker destekli
+  ve iki uctan capali, `ExcludeOus` DN-siniri eslesmesi, `primaryGroupID` 516/521,
+  `*Server*` OS, bos OS). Her taramada **tek satir ozet**: sebep bazli sayim,
+  ornek adlar ve **hicbir seye eslesmeyen desenler** (bir yazim hatasi sessizce
+  sunuculari tekrar taratmasin).
+- `ExcludeUnknownOperatingSystem` **varsayilan KAPALI**. Bos `operatingSystem` bir
+  ipucudur, kanit degil: yeni katilmis ama hic acilmamis gercek bir is istasyonu
+  ayni gorunur. nbr.local'de `-ExcludeUnknownOperatingSystem` ile acikca acilir.
+- Deploy artik **her yolda** (yalniz `-AutoConfigure` degil) bos/domain-koku
+  kapsami reddediyor. Bos `DefaultOuFilter` servise "ayarlanmamis" degil "tum
+  domain" demektir.
+
+### Baslangic ve teshis
+- Sertifika aramasi `validOnly:false` + **acik kontroller** (private key, tarih
+  araligi, ServerAuth EKU veya EKU yoklugu); birden fazla eslesmede en gec
+  bitenden secilir. Zincir dogrulanamazsa **kabul edilir ama uyarilir**.
+- Baslangic istisnalari `startup-failure-<utc>.log` + Event Log'a yazilip
+  yeniden firlatiliyor; arka plan servisleri icin `service-<yyyyMMdd>.log`
+  rolling dosya sink'i eklendi.
+- `Get-O365AuditDiagnostics.ps1` artik `.failed-*` dizinlerini buluyor, Event Log
+  kuyrugunu ve sertifika zincir durumunu raporluyor.
+- Deploy self-signed sertifikanin **public** bolumunu `Root`'a aliyor ve zinciri
+  yeniden dogruluyor. **CA=true sertifika asla otomatik guvenilir yapilmaz**
+  (makine genelinde sinirsiz guven delegasyonu olurdu).
+
+### Dashboard
+- Siniflandirma kurallari `wwwroot/dashboard-logic.js`'e tasindi ve sunucuyla
+  ayni siraya getirildi (exit kodu → yetki metni → genel metin). `exit 6 /
+  handle is invalid` artik "Ag / Offline" degil yetki hatasi olarak gosteriliyor.
+
+## 3. Hakemlenen tartismalar (tekrar acilmasin)
+
+- **"Zincir dogrulanamazsa deploy hata firlatsin"** — uygulanmadi. `validOnly:false`
+  geldikten sonra guvenilmeyen zincir servisi artik engellemiyor; firlatmak
+  calisacak bir kurulumu bloke ederdi. Uyari dogru davranis.
+- **"`ExcludeUnknownOperatingSystem` varsayilan `true` olsun"** — reddedildi.
+  Alt-ajanin karsi ornegi OU kapsami uygulanmadan olculmustu; `OU=PC,OU=NBR`
+  kapsamiyla appliance'lar zaten disarida kaliyor. Sessiz daraltma riski daha agir.
+- Curutulen eski hipotezler: 32-bit PsExec fallback eksikligi, orphan collector
+  sureci, retry kuyrugu acligi, "-n yoklugu 300 sn slot isgal ediyor" (gercek OS
+  SMB timeout'u ~20-45 sn).
+
+## 3b. NBRADC kurulumu (20 Agustos 06:11, dogrulandi)
+
+**v1.3.2 kuruldu ve calisiyor.** Kurulum sirasinda iki gercek hata ortaya cikti ve duzeltildi:
+
+1. **TLS private key cozumlenemiyor (deployment'i bloke ediyordu).** `Grant-TlsPrivateKeyRead`
+   anahtar dosyasinin yerini .NET **tipine** gore seciyordu. Olculdu: NBRADC'nin AD CS sertifikasi
+   `RSACng` olarak gorunuyor ama saglayicisi "Microsoft RSA SChannel Cryptographic Provider" —
+   yani CNG API'siyle gorunen eski CAPI anahtari; dosyasi `Crypto\RSA\MachineKeys` altinda,
+   `Crypto\Keys` altinda degil. Depolama yerini tip degil **saglayici** belirler. Artik anahtar kabi
+   adindan iki dizin de deneniyor ve hata mesaji denenen tum yollari yaziyor.
+2. **`Test-SpnEligibleAccount` DOMAIN\user ayrimini bos string ile yapiyordu** — her hesap
+   dogrulanamaz oluyordu. Fail-closed davrandigi icin guvenlik sonucu dogruydu, mesaji yanlisti.
+
+Kurulum ilk denemede **on-kontrolde** durdu: servis calismaya devam etti, uygulama dizinine
+dokunulmadi. Yani yeni teshis yolu amacina ulasti.
+
+**Kurulum sonrasi dogrulama (hepsi gecti):**
+
+| Kontrol | Sonuc |
+|---|---|
+| Surum | 1.3.2.0, servis Running, 5080/5081 dinliyor |
+| Tarama kapsami | `OU=PC,OU=NBR,DC=nbr,DC=local` |
+| Dislamalar | `OU=SERVER,DC=nbr,DC=local` · `NAS*`, `*SYNOLOGY*`, `NBR_DS*` · UnknownOS=True |
+| `startup-failure-*.log` | yok |
+| **Negatif kontrol:** Administrator uzerindeki HTTP SPN | **0** (SPN korumasi regresyonu onledi) |
+| NBRADC$ uzerindeki HTTP SPN | 2 (yerinde kaldi) |
+| Kalinti `.staging`/`.failed`/`.rollback` | yok |
+
+**Bilinen eksik:** Deploy scripti yeni Collector anahtarlarindan yalnizca ucunu yaziyor
+(`ExcludeDeviceNames`, `ExcludeOus`, `ExcludeUnknownOperatingSystem`).
+`PsExecConnectTimeoutSeconds`, `ReachabilityProbeEnabled`, `ReachabilityProbePort`,
+`ReachabilityProbeTimeoutSeconds`, `ExcludeServerOperatingSystems`, `ExcludeDomainControllers`
+appsettings'e yazilmiyor; CollectorOptions varsayilanlariyla (30 sn / probe acik) dogru calisiyorlar
+ama site bazinda ayarlanamiyorlar.
+
+## 3c. Ata projeden geri alinan kapsam ve dayaniklilik (21 Agustos)
+
+Sikayet: "eski duzen PST ve profilleri cikariyordu, yenisinde cok sorun var". Iki collector
+yan yana okundu. Kullanicinin hipotezi (Office surum kesfi) **elendi**: `Get-OfficeInfo`
+kendi try/catch'i icinde ve `Get-OutlookProfileInfo`'dan bagimsiz cagriliyor, yani tamamen
+cokse bile posta verisi toplanmaya devam eder. Paylasim izinleri de dogru olculdu
+(`Domain Computers` -> Read, hem SMB hem NTFS) ve sunucudaki collector.ps1 repo ile ayni SHA.
+
+Gercek sebep alti maddeydi; hepsi duzeltildi:
+
+| # | Gerileme | Duzeltme |
+|---|---|---|
+| 1 | PST aramasi 3 kanonik klasore daralmisti; ata proje `Documents` kokunu, `Desktop`'i, `AppData\Roaming\...\Outlook`'u ve **D:/E: tum surucuyu** rekursif tariyordu | Profil alt dizinleri geri geldi + `Get-NonSystemFixedDriveRoots` ile tum sistem-disi sabit suruculer, butce ve dislama listesiyle |
+| 2 | OST toplama tamamen kalkmisti (ata projede 22 referans) | `legacyFiles` icine `artifactType='OST'` olarak geri geldi - yeni tablo/migration yok |
+| 3 | NK2 yalnizca uzantiyla esleniyordu; RoamCache `Stream_Autocomplete_*.dat` gorunmuyordu | `Get-LegacyArtifactType` adla da esliyor, tip `AUTOCOMPLETE` |
+| 4 | Sonuc tek kanaldan, PsExec **stdout**'undan doniyordu; stdout OEM kod sayfasina sabit | Sonuc write-only drop box'a **UTF-8 (BOM'suz)** yaziliyor, stdout'ta tek satir `O365AUDIT-RESULT <dosya>`; yazma basarisizsa stdout'a **geri dusuyor** (iki kanal) |
+| 5 | `$ErrorActionPreference='Stop'` + tek buyuk try/catch: profil dongusunde tek hata `profiles`+`mailAccounts`+`pstFiles`+`legacyFiles` dordunu birden bosaltiyordu | Dongu govdesi profil basina try/catch; kismi sonuc doner |
+| 6 | `Office\14.0\Outlook\Profiles` koku dusmustu | Geri eklendi |
+
+**Drop box guvenligi:** ayri share (`o365audit-results`), NTFS'te Domain Computers icin
+yalnizca `CreateFiles, AppendData, WriteAttributes, WriteExtendedAttributes, Synchronize` -
+**ListDirectory/ReadData/Delete yok**. Endpoint kendi dosyasini birakir, baska cihazin
+envanterini okuyamaz. Endpoint'in bildirdigi dosya **adi** guvenilmez girdi sayilir:
+yalnizca cirilciplak dosya adi kabul edilir, beklenen hostname ile baslamalidir ve cozulen
+yol drop box'in icinde kalmalidir. Tuketilen dosya silinir; 6 saatte bir 24 saatten eski
+artiklar suprulur.
+
+**Kopyalama planlari:** `ArtifactCopyService.DefaultArtifactTypes` hala `PST, NK2, N2K`.
+OST ve AUTOCOMPLETE envanterde gorunur ama kopyalanamaz - OST yeniden uretilebilir bir
+onbellek, kopyalamak anlamsiz.
+
+**Dogrulama (bu makinede gercekten calistirildi):**
+- Collector 11 sn'de tamamlandi, stdout tek satir marker, payload drop box'ta gecerli JSON.
+- **OST bulundu** (`mehmet@itwise.com.tr.ost`) ve **AUTOCOMPLETE bulundu** - ikisi de
+  duzeltmeden once tamamen gorunmezdi.
+- `Documents\ZZ-test-arsiv.pst` ve `Desktop\ZZ-test-masaustu.pst` sonda dosyalari **bulundu**;
+  bu iki konum eski surumde taranmiyordu. (Bu makinede sistem-disi sabit surucu yok, yani
+  D:/E: yolu sahada NBR endpoint'lerinde ilk kez calisacak.)
+- Yetkisiz kosuldugu icin diger profillerin `reg load`'u basarisiz oldu; **payload yine de
+  eksiksiz dondu** - istenen dayaniklilik davranisi tam olarak bu.
+- 169 xUnit + 17 node testi gecti, `dotnet format` temiz.
+
+## 4. Acik isler
+
+- [ ] **Olcum kapisi**: yeni surum kuruldiktan sonra tarama calistirilip 10
+      "JSON yok" cihazinin **ham ciktisi** okunacak. P0-D/E (payload'i share'e
+      yazma, collector'i endpoint yerel diskine kopyalama) bu kanita gore
+      tasarlanacak — kor uygulanmayacak.
+- [ ] BURCUDC kurulumu yeni surumle tekrar denenecek (P0-A/B dogrudan bunu hedefler).
+- [ ] gMSA gecisi (P1-A/B): servis kalici olarak `NBR\Administrator` ile kosmamali;
+      `-AutoConfigure` bos kimlikle SPN'i built-in Administrator'a tasiyip onu
+      Kerberoastable yapiyor.
+- [ ] Dashboard `PsExecExitCode` kolonunu API'den okuyup metin ayristirmayi biraksin.
+- [ ] Issue #12, #13.
+
+## 5. Kurulum (nbr.local)
+
+Kapsam artik acikca verilmek zorunda:
+
+```powershell
+$u='https://github.com/deepdarbe/O365AuditTool/releases/download/v<SURUM>'
+$s="$env:TEMP\i.ps1"; irm "$u/Install-O365AuditTool-<SURUM>.ps1" -OutFile $s
+& $s -BundleUri "$u/O365AuditTool-<SURUM>-win-x64.zip" -ExpectedSha256 '<HASH>' -AutoConfigure `
+     -DefaultOuFilter 'OU=PC,OU=NBR,DC=nbr,DC=local' `
+     -ExcludeOus 'OU=SERVER,DC=nbr,DC=local' `
+     -ExcludeDeviceNames 'NAS*','*SYNOLOGY*','NBR_DS*' `
+     -ExcludeUnknownOperatingSystem
+```

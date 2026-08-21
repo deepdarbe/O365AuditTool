@@ -20,12 +20,38 @@ param(
     [switch]$AutoConfigure,
     [string]$PsExecPath = 'C:\Tools\PsExec\PsExec64.exe',
     [bool]$DownloadPsExecIfMissing = $true,
+    # Ranges mirror Deploy-ManagementServer.ps1 so a bad value is refused here, before the bundle is
+    # downloaded and the service is stopped. [bool] and not [switch] for ReachabilityProbeEnabled:
+    # the service default is TRUE and an omitted switch would forward FALSE.
+    [ValidateRange(1, 600)]
+    [int]$PsExecConnectTimeoutSeconds = 30,
+    [bool]$ReachabilityProbeEnabled = $true,
+    [ValidateRange(1, 65535)]
+    [int]$ReachabilityProbePort = 445,
+    [ValidateRange(1, 60)]
+    [int]$ReachabilityProbeTimeoutSeconds = 5,
     [string]$CollectorSharePath = '',
     [string]$CollectorShareName = 'o365audit',
+    # Write-only drop box for collector results. Endpoints create files here but cannot list,
+    # read or delete them.
+    [string]$CollectorResultSharePath = '',
+    [string]$CollectorResultShareName = 'o365audit-results',
+    [ValidateRange(5, 3600)]
+    [int]$PstScanBudgetSeconds = 120,
+    # Defaults TRUE in CollectorOptions; a [switch] left off would forward FALSE and silently
+    # stop searching the data drives for detached PST archives.
+    [bool]$PstScanFixedDrives = $true,
     [string]$DomainComputersGroup = "",
     [string[]]$FallbackTargets = @(),
     [string]$DefaultOuFilter = "",
     [string]$DefaultSiteFilter = "",
+    [string[]]$ExcludeDeviceNames = @(),
+    [string[]]$ExcludeOus = @(),
+    # Both default TRUE in CollectorOptions; a [switch] left off would forward FALSE and put every
+    # server and domain controller back into the nightly scan.
+    [bool]$ExcludeServerOperatingSystems = $true,
+    [bool]$ExcludeDomainControllers = $true,
+    [switch]$ExcludeUnknownOperatingSystem,
     [string[]]$AuditAdminGroups = @(),
     [string[]]$AuditReaderGroups = @(),
     [string[]]$MigrationPlannerGroups = @(),
@@ -357,12 +383,25 @@ try {
         'HealthPort',
         'DashboardDnsName',
         'TlsCertificateThumbprint',
+        'PsExecConnectTimeoutSeconds',
+        'ReachabilityProbeEnabled',
+        'ReachabilityProbePort',
+        'ReachabilityProbeTimeoutSeconds',
         'CollectorSharePath',
         'CollectorShareName',
+        'CollectorResultSharePath',
+        'CollectorResultShareName',
+        'PstScanBudgetSeconds',
+        'PstScanFixedDrives',
         'DomainComputersGroup',
         'FallbackTargets',
         'DefaultOuFilter',
         'DefaultSiteFilter',
+        'ExcludeDeviceNames',
+        'ExcludeOus',
+        'ExcludeServerOperatingSystems',
+        'ExcludeDomainControllers',
+        'ExcludeUnknownOperatingSystem',
         'AuditAdminGroups',
         'AuditReaderGroups',
         'MigrationPlannerGroups',

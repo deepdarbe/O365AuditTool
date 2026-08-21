@@ -8,7 +8,7 @@ namespace O365AuditTool.Services;
 public interface IInventoryIngestionService
 {
     Task<DeviceInventory> SavePayloadAsync(Guid jobId, DeviceTarget target, CollectorPayload payload, CancellationToken cancellationToken);
-    Task<DeviceInventory> SaveFailureAsync(Guid jobId, DeviceTarget target, string error, DeviceScanStatus status, CancellationToken cancellationToken);
+    Task<DeviceInventory> SaveFailureAsync(Guid jobId, DeviceTarget target, string error, DeviceScanStatus status, CancellationToken cancellationToken, int? psExecExitCode = null);
 }
 
 public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIngestionService
@@ -130,8 +130,12 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
                 continue;
             }
 
+            // OST is the cached mailbox and AUTOCOMPLETE is the RoamCache stream the
+            // ancestor collector reported; both were lost when the rewrite narrowed the
+            // scan to two extensions. OST size is the best available proxy for mailbox
+            // size when planning a migration.
             var artifactType = legacyFile.ArtifactType?.Trim().ToUpperInvariant();
-            if (artifactType is not ("NK2" or "N2K"))
+            if (artifactType is not ("NK2" or "N2K" or "OST" or "AUTOCOMPLETE"))
             {
                 continue;
             }
@@ -162,7 +166,7 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
         return device;
     }
 
-    public async Task<DeviceInventory> SaveFailureAsync(Guid jobId, DeviceTarget target, string error, DeviceScanStatus status, CancellationToken cancellationToken)
+    public async Task<DeviceInventory> SaveFailureAsync(Guid jobId, DeviceTarget target, string error, DeviceScanStatus status, CancellationToken cancellationToken, int? psExecExitCode = null)
     {
         if (status is DeviceScanStatus.Success or DeviceScanStatus.Partial)
         {
@@ -178,6 +182,7 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
             CollectedUtc = DateTime.UtcNow,
             Status = status,
             ErrorMessage = Truncate(error, 4096),
+            PsExecExitCode = psExecExitCode,
             IpAddressesJson = "[]",
             RawPayloadJson = "{}"
         };

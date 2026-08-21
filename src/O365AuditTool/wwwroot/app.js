@@ -152,7 +152,8 @@ async function loadSession() {
     const authenticationType = String(session.authenticationType || "Negotiate");
     const normalizedType = authenticationType.toLowerCase();
     const roles = Array.isArray(session.roles) && session.roles.length ? ` · ${session.roles.join(", ")}` : "";
-    badge.textContent = `${session.userName || "Windows kullanıcısı"} · ${authenticationType}${roles}`;
+    const version = session.appVersion ? ` · v${session.appVersion}` : "";
+    badge.textContent = `${session.userName || "Windows kullanıcısı"} · ${authenticationType}${roles}${version}`;
     badge.className = "session-badge";
     if (normalizedType.includes("kerberos")) {
       badge.classList.add("kerberos");
@@ -222,9 +223,23 @@ function renderOuOptions(searchTerm = "") {
   replaceScopeOptions(
     "fOu",
     matches,
-    normalizedSearch ? `${matches.length} OU eşleşti` : "Bir OU seçin",
+    normalizedSearch ? `Bir OU seçin · ${matches.length} eşleşme` : "Bir OU seçin",
     item => item.distinguishedName,
     item => `${"\u00a0\u00a0".repeat(Math.max(0, Number(item.depth || 1) - 1))}${item.displayName || item.name}`);
+
+  // Searching only filters the list; the placeholder stays selected, so an operator who
+  // typed a full DN could believe a scope was chosen while the scan button stayed disabled.
+  // Select automatically when the search leaves no ambiguity.
+  const select = byId("fOu");
+  if (!select.value && normalizedSearch) {
+    const exact = matches.find(item =>
+      String(item.distinguishedName || "").toLocaleLowerCase("tr-TR") === normalizedSearch);
+    const resolved = exact || (matches.length === 1 ? matches[0] : null);
+    if (resolved) {
+      select.value = resolved.distinguishedName;
+    }
+  }
+  updateScanReadiness();
 }
 
 function updateScanReadiness() {
@@ -323,12 +338,19 @@ function appendCell(row, value, className = "") {
   return cell;
 }
 
-function appendStatusCell(row, text, className) {
+function appendStatusCell(row, text, className, exitCode = null) {
   const cell = document.createElement("td");
   const status = document.createElement("span");
   status.textContent = text;
   status.className = className;
   cell.appendChild(status);
+  if (exitCode !== null && exitCode !== undefined) {
+    const badge = document.createElement("span");
+    badge.className = "status-exit";
+    badge.textContent = `PsExec exit ${exitCode}`;
+    badge.title = "Toplayıcının döndürdüğü PsExec çıkış kodu";
+    cell.append(document.createElement("br"), badge);
+  }
   row.appendChild(cell);
 }
 
@@ -415,6 +437,7 @@ async function loadData() {
     const data = asArray(await fetchJson(`/api/inventory/devices?${query}`));
     const stats = renderStats(data);
     renderDeviceRows(data, query.size > 0);
+    renderFailureSummary(data);
     const updatedTime = new Date().toLocaleTimeString("tr-TR");
     const stamp = `Güncel · ${updatedTime}`;
     const degraded = data.length > 0 && (stats.offline > 0 || stats.errors > 0);
@@ -448,6 +471,126 @@ async function loadData() {
     setButtonBusy(filterButton, false);
     updateReadinessSummary();
   }
+}
+
+// Failure classification lives in dashboard-logic.js and is shared with the server rules in
+// PsExecCollectorRunner.IsOfflineFailure. Keeping a second copy here is what let the dashboard
+// drift and label the 2026-08 authorization incident (PsExec exit 6) as "Ağ / Offline".
+const { categoryLabels, resolvePsExecExit, classifyFailure } = globalThis.O365Dashboard;
+
+const statusFilterNames = { 1: "Offline", 2: "Error", 3: "Partial", 4: "Timeout" };
+
+function buildFailureRow(group) {
+  const row = document.createElement("div");
+  row.className = "failure-row";
+
+  const count = document.createElement("span");
+  count.className = "count";
+  count.textContent = String(group.count);
+  row.appendChild(count);
+
+  const badge = document.createElement("span");
+  badge.className = `failure-badge ${group.category}`;
+  badge.textContent = categoryLabels[group.category] || categoryLabels.error;
+  row.appendChild(badge);
+
+  // The exit code belongs in the group heading, next to the badge: it is the one token an operator
+  // can match against the server's own classification (and against the "PsExec exit N:" prefix in
+  // the error column) without reading the Turkish prose underneath. Rows that predate the stored
+  // column say so, so a missing chip is never mistaken for "the server reported no code".
+  const chip = document.createElement("span");
+  const hasExit = group.exit !== null && group.exit !== undefined;
+  chip.className = hasExit ? "exit-chip" : "exit-chip none";
+  chip.textContent = hasExit ? `PsExec exit ${group.exit}` : "PsExec exit kodu yok";
+  chip.title = hasExit
+    ? "Sunucunun kaydettiği PsExec çıkış kodu; sunucu sınıflandırmasıyla bire bir eşleşir"
+    : "Bu kayıtlarda çıkış kodu saklanmamış; sınıflandırma hata metninden çıkarıldı";
+  row.appendChild(chip);
+
+  const reason = document.createElement("div");
+  reason.className = "failure-reason";
+  const label = document.createElement("div");
+  label.className = "r-label";
+  label.textContent = group.label;
+  const hint = document.createElement("div");
+  hint.className = "r-hint";
+  const sample = group.devices.slice(0, 3).join(", ");
+  hint.textContent = group.devices.length > 3
+    ? `${group.hint} · örn. ${sample} +${group.devices.length - 3}`
+    : `${group.hint} · ${sample}`;
+  reason.append(label, hint);
+  row.appendChild(reason);
+
+  const action = document.createElement("button");
+  action.type = "button";
+  action.className = "secondary";
+  action.textContent = "Bu durumu filtrele";
+  action.addEventListener("click", () => {
+    byId("fStatus").value = statusFilterNames[group.statusNum] || "Error";
+    loadData();
+    byId("inventory").scrollIntoView({ behavior: "smooth" });
+  });
+  row.appendChild(action);
+
+  return row;
+}
+
+function renderFailureSummary(data) {
+  const panel = byId("failure-summary");
+  const navLink = byId("failureNavLink");
+  const container = byId("failureGroups");
+  const failed = data.filter(device => [1, 2, 3, 4].includes(Number(device.status)));
+
+  if (failed.length === 0) {
+    panel.hidden = true;
+    if (navLink) navLink.hidden = true;
+    container.replaceChildren();
+    return;
+  }
+
+  const groups = new Map();
+  failed.forEach(device => {
+    // Group on the effective exit code (stored column first, message text only as fallback) plus
+    // the category, so devices stopped by the same Win32 code land in one row however their
+    // endpoint worded the error. The label stays in the key only to keep unrecognised codes apart:
+    // those fall back to the raw message, and merging them would put one device's text on all of
+    // them.
+    const info = classifyFailure(device);
+    const key = `${info.category}|${info.exit ?? "-"}|${info.label}`;
+    const existing = groups.get(key) || { ...info, count: 0, devices: [] };
+    existing.count += 1;
+    existing.devices.push(device.deviceName || "?");
+    groups.set(key, existing);
+  });
+
+  const ordered = [...groups.values()].sort((a, b) => b.count - a.count);
+  const fragment = document.createDocumentFragment();
+  ordered.forEach(group => fragment.appendChild(buildFailureRow(group)));
+  container.replaceChildren(fragment);
+
+  // Show how old the underlying scan data is. The panel is rendered on page load, so a
+  // load timestamp would wrongly suggest the rows are fresh.
+  const collectedTimes = failed
+    .map(device => new Date(device.collectedUtc).getTime())
+    .filter(time => Number.isFinite(time));
+  const newestCollected = collectedTimes.length ? new Date(Math.max(...collectedTimes)) : null;
+
+  const stamp = byId("failurePanelStamp");
+  stamp.textContent = newestCollected
+    ? `${failed.length} başarısız · ${ordered.length} neden · veri: ${newestCollected.toLocaleString("tr-TR")}`
+    : `${failed.length} başarısız · ${ordered.length} neden`;
+  stamp.className = "panel-stamp warning";
+
+  // Every failure recorded by v1.2.2+ carries an exit code. If none do, these rows predate
+  // the running build and no scan has been run since the upgrade.
+  const staleNotice = byId("failureStaleNotice");
+  const anyExitCode = ordered.some(group => group.exit !== null && group.exit !== undefined);
+  if (staleNotice) {
+    staleNotice.hidden = anyExitCode;
+  }
+
+  panel.hidden = false;
+  if (navLink) navLink.hidden = false;
 }
 
 function renderStats(data) {
@@ -521,7 +664,7 @@ function renderDeviceRows(data, hasFilters = false) {
     appendCell(row, device.ou || "-");
     appendCell(row, device.site || "-");
     const status = deviceStatuses[Number(device.status)] || [String(device.status ?? "Bilinmiyor"), "muted"];
-    appendStatusCell(row, status[0], status[1]);
+    appendStatusCell(row, status[0], status[1], resolvePsExecExit(device));
     appendCell(row, device.serialNumber || "-");
     appendCell(row, formatIpAddresses(device.ipAddresses));
     appendCell(
@@ -666,7 +809,7 @@ async function loadLegacyFiles() {
   const hadData = byId("legacyRows").childElementCount > 0;
   setButtonBusy(filterButton, true, "Filtreleniyor");
   setPanelState("legacy", "legacyPanelStamp", "loading", "Yükleniyor");
-  setFeedback("legacyFeedback", "NK2/N2K envanteri yükleniyor...");
+  setFeedback("legacyFeedback", "Legacy Outlook dosyaları yükleniyor...");
   try {
     const files = asArray(await fetchJson(`/api/inventory/legacy-files?${getLegacyFilterQuery()}`));
     renderLegacyRows(files);
@@ -742,9 +885,17 @@ function renderScanProgress(job) {
   const progress = byId("scanProgressBar");
   byId("scanProgress").hidden = false;
   byId("scanProgressTitle").textContent = `Tarama ${status.toLocaleLowerCase("tr-TR")} · ${job.id || activeScanJobId}`;
+  // A failed job never gets device stats, so without this it kept showing
+  // "preparing the target list" and the actual reason (job notes) stayed hidden.
+  const notes = String(job?.notes || "").trim();
+  const failed = Number(job?.status) === 4 || String(job?.status || "").toLowerCase() === "failed";
   byId("scanProgressDetail").textContent = total
     ? `${completed}/${total} sonuç · ${stats.success || 0} başarılı · ${stats.offline || 0} çevrimdışı · ${(stats.error || 0) + (stats.partial || 0) + (stats.timeout || 0)} hata/kısmi`
-    : "Hedef cihaz listesi hazırlanıyor.";
+    : failed
+      ? (notes || "Tarama başarısız oldu; sunucu bir neden bildirmedi. Servis günlüklerine bakın.")
+      : isTerminalJobStatus(job?.status)
+        ? (notes || "Tarama tamamlandı fakat hiçbir cihaz sonucu kaydedilmedi.")
+        : "Hedef cihaz listesi hazırlanıyor.";
   if (total > 0) {
     progress.max = total;
     progress.value = Math.min(completed, total);

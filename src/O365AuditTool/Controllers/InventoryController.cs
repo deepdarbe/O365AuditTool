@@ -38,6 +38,9 @@ public class InventoryController(IInventoryQueryService queryService) : Controll
             d.CollectedUtc,
             d.Status,
             d.ErrorMessage,
+            // The dashboard groups failures by this code. Parsing it back out of the message text
+            // is what let one authorization failure read as a network outage across 117 devices.
+            d.PsExecExitCode,
             ipAddresses = ParseIpAddresses(d.IpAddressesJson),
             pstTotalBytes = d.PstFiles.Sum(x => x.SizeBytes),
             disks = d.Disks.Select(x => new { x.Model, x.InterfaceType, x.BusType, x.MediaType, x.SizeBytes }),

@@ -16,8 +16,12 @@ Active Directory uyesi Windows cihazlardan agent kurmadan O365 migration envante
 - `scripts/collector.ps1`: Endpoint envanter collector'i.
 - `scripts/Deploy-ManagementServer.ps1`: Guvenli domain deployment scripti.
 - `scripts/Invoke-ManualScan.ps1`: Manuel tarama tetikleme scripti.
+- `scripts/Invoke-CollectorAccessDiagnostic.ps1`: Tek endpoint icin servis kimligi altinda DNS/445/ADMIN$/SCM ve gercek PsExec exit kodu teshisi.
 - `docs/DEPLOYMENT-DC.md`: Yetkiler, gMSA ve kurulum rehberi.
 - `docs/O365-ARTIFACT-COPY-ARCHITECTURE.md`: NK2/N2K kesfi ve copy plan workflow mimarisi.
+- `docs/COLLECTOR-RUNTIME-AND-DIAGNOSTICS.md`: Collector calisma akisi, offline/error siniflandirma ve teshis diyagramlari.
+- `docs/CLAUDE-FINDINGS-PSEXEC-OFFLINE.md`: "Tum cihazlar offline" olayinin kod duzeyinde analizi.
+- `docs/CLAUDE-HANDOFF-2026-08-19.md`: Vakanin kapanisi, kalan hatalar ve acik isler.
 
 ## Hizli Deployment
 
@@ -165,6 +169,33 @@ Plan olusturmak kopyalamayi baslatmaz. Dashboard'da plan hedefi, oge sayisi ve t
 Dashboard cihaz, AD'den otomatik yuklenen OU/site, kullanici, disk tipi, Office surumu, durum ve PST boyut araligi filtrelerini CSV/PDF export'a aynen tasir. Site sorgusu basarisizsa OU listesi kullanilabilir kalir; dogrudan OU kesfi basarisizsa bilgisayar DN'lerinden kapsam agaci uretilir. Profil loaded/default, aktif hesap, Office process owner/PID, volume free/total ve guncel scan hatasi ayrintilari merkezi tabloda gorunur.
 
 Endpoint local Administrator/ADMIN$/SCM yetkileri, SMB collector izinleri, gMSA hazirligi ve sorun giderme icin [domain deployment rehberine](docs/DEPLOYMENT-DC.md) bakin.
+
+## Teshis ve Sorun Giderme
+
+Bir cihaz yalnizca ag/RPC sinifi bir PsExec hatasi urettiginde `Offline`
+siniflandirilir; **erisim reddi (`access is denied`) `Error`'dur, `Offline`
+degildir**. Bu yuzden tum cihazlarin `Offline` gorunmesi genelde bir yetki
+sorunu degil, yonetim sunucusundan endpointlere **SMB/445 / ADMIN$ / DNS**
+erisim blokajidir. Ayrinti ve karar agaci: [COLLECTOR-RUNTIME-AND-DIAGNOSTICS.md](docs/COLLECTOR-RUNTIME-AND-DIAGNOSTICS.md).
+
+- **Tam neden gorunur**: basarisiz kayitlar `errorMessage` alaninda
+  `PsExec exit N: ...` bicimindedir; siniflandirma stderr ve stdout'un ikisini
+  de dikkate alir.
+- **Yerellestirilmis metin**: PsExec cikti akislari host'un OEM code page'ine
+  (Turkce icin CP857/CP1254) gore cozulur; boylece yerellestirilmis
+  yetki/ag isaretcileri dogru eslesir.
+- **Dashboard Ariza ozeti**: basarisiz cihazlar tam neden + PsExec exit koduna
+  gore gruplanir (Ag/Offline, Yetki, Zaman asimi); "Bu durumu filtrele" ile
+  ilgili duruma suzulur, tabloda "PsExec exit N" rozeti gorunur.
+- **Servis kimligi altinda kanit**: yonetim sunucusunda (yukseltilmis PowerShell)
+
+  ```powershell
+  .\scripts\Invoke-CollectorAccessDiagnostic.ps1 -Target PC-TEST-01
+  ```
+
+  komutu DNS/445/ADMIN$/SCM'yi gercek servis kimligiyle (`psexec -s`) test eder
+  ve gercek collector cagrisinin tam exit kodu + hata metnini yakalayarak bir
+  VERDICT (SUCCESS / AUTHORIZATION / NETWORK-OFFLINE / UNCLASSIFIED) verir.
 
 ## Gelistirme
 

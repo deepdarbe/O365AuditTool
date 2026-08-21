@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z.-]{0,63}$')]
@@ -79,6 +79,7 @@ $releaseInputs = @(
     'scripts/collector.ps1',
     'scripts/Get-O365AuditDiagnostics.ps1',
     'scripts/Install-O365AuditTool.ps1',
+    'scripts/Invoke-CollectorAccessDiagnostic.ps1',
     'scripts/New-O365AuditRelease.ps1'
 )
 if (-not $AllowDirtyWorktree) {
@@ -122,6 +123,8 @@ try {
         -c Release `
         -r $Runtime `
         --self-contained true `
+        -p:Version=$Version `
+        -p:InformationalVersion=$Version `
         -p:PublishSingleFile=false `
         -p:PublishTrimmed=false `
         -p:DebugType=None `
@@ -137,6 +140,8 @@ try {
         -Destination (Join-Path $scriptsRoot 'collector.ps1') -Force
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Get-O365AuditDiagnostics.ps1') `
         -Destination (Join-Path $scriptsRoot 'Get-O365AuditDiagnostics.ps1') -Force
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Invoke-CollectorAccessDiagnostic.ps1') `
+        -Destination (Join-Path $scriptsRoot 'Invoke-CollectorAccessDiagnostic.ps1') -Force
 
     $commit = 'uncommitted'
     try {

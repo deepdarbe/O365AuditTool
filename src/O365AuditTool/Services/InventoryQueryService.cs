@@ -40,6 +40,7 @@ public partial class InventoryQueryService(AuditDbContext db) : IInventoryQueryS
                     x.Site,
                     x.Status,
                     x.ErrorMessage,
+                    x.PsExecExitCode,
                     x.CollectedUtc))
                 .First())
             .ToListAsync(cancellationToken);
@@ -148,6 +149,7 @@ public partial class InventoryQueryService(AuditDbContext db) : IInventoryQueryS
             {
                 row.Status = currentState.Status;
                 row.ErrorMessage = currentState.ErrorMessage;
+                row.PsExecExitCode = currentState.PsExecExitCode;
                 row.Ou = currentState.Ou ?? row.Ou;
                 row.Site = currentState.Site ?? row.Site;
             }
@@ -190,6 +192,7 @@ public partial class InventoryQueryService(AuditDbContext db) : IInventoryQueryS
         string? Site,
         DeviceScanStatus Status,
         string? ErrorMessage,
+        int? PsExecExitCode,
         DateTime CollectedUtc);
 }
 

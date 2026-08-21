@@ -18,4 +18,10 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\O365AuditTool\O365AuditTool.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Source of the psexec.exe stand-in. It is C# 5 targeting .NET Framework and declares its
+         own Main, so it must reach the output directory as content, never as compiled code. -->
+    <None Update="TestStubs\PsExecStubProgram.cs.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

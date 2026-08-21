@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using O365AuditTool.Data;
 using O365AuditTool.Models;
@@ -237,8 +237,28 @@ public class ScanOrchestratorService(
 
         if (targets.Count == 0)
         {
+            // Name the filters that were actually applied. A site filter is the usual culprit:
+            // it is matched against the computer's msDS-SiteName, which is a constructed
+            // attribute that is empty for most workstations, so combining it with an OU filter
+            // silently eliminates every target.
+            var scope = new List<string>();
+            if (!string.IsNullOrWhiteSpace(ouFilter))
+            {
+                scope.Add($"OU='{ouFilter}'");
+            }
+            if (!string.IsNullOrWhiteSpace(siteFilter))
+            {
+                scope.Add($"site='{siteFilter}'");
+            }
+
+            var scopeText = scope.Count == 0 ? "no explicit scope" : string.Join(" and ", scope);
+            var siteHint = string.IsNullOrWhiteSpace(siteFilter)
+                ? string.Empty
+                : " The AD site filter only matches computers that publish msDS-SiteName, which is empty for most workstations; clear the site filter and scan by OU alone.";
+
             throw new InvalidOperationException(
-                "No target devices were discovered. Verify AD connectivity, OU filters, and fallback targets.");
+                $"No target devices were discovered for {scopeText}. Enabled computers inactive for more than " +
+                $"{_options.ExcludeComputersInactiveDays} days are also excluded.{siteHint}");
         }
 
         var errorCount = 0;
@@ -280,7 +300,8 @@ public class ScanOrchestratorService(
                                 target,
                                 result.ErrorMessage ?? "Unknown error",
                                 GetFailureStatus(result),
-                                deviceCancellationToken);
+                                deviceCancellationToken,
+                                result.ExitCode);
 
                             if (item.Status == DeviceScanStatus.Offline)
                             {
@@ -383,7 +404,8 @@ public class ScanOrchestratorService(
                                 target,
                                 result.ErrorMessage ?? "Unknown retry error",
                                 failureStatus,
-                                deviceCancellationToken);
+                                deviceCancellationToken,
+                                result.ExitCode);
 
                             if (failureStatus != DeviceScanStatus.Offline)
                             {
