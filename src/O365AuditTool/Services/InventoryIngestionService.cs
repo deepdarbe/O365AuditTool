@@ -130,8 +130,12 @@ public class InventoryIngestionService(AuditDbContext dbContext) : IInventoryIng
                 continue;
             }
 
+            // OST is the cached mailbox and AUTOCOMPLETE is the RoamCache stream the
+            // ancestor collector reported; both were lost when the rewrite narrowed the
+            // scan to two extensions. OST size is the best available proxy for mailbox
+            // size when planning a migration.
             var artifactType = legacyFile.ArtifactType?.Trim().ToUpperInvariant();
-            if (artifactType is not ("NK2" or "N2K"))
+            if (artifactType is not ("NK2" or "N2K" or "OST" or "AUTOCOMPLETE"))
             {
                 continue;
             }

@@ -230,6 +230,44 @@ public class InventoryIngestionServiceTests
         Assert.Equal(DeviceScanStatus.Success, stored[0].Status);
     }
 
+    [Fact]
+    public async Task SavePayload_KeepsOstAndAutocompleteArtifacts()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AuditDbContext>()
+            .UseSqlite(connection)
+            .Options;
+
+        await using var db = new AuditDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var job = new ScanJob();
+        db.ScanJobs.Add(job);
+        await db.SaveChangesAsync();
+
+        var payload = new CollectorPayload
+        {
+            Device = new CollectorDevice { Hostname = "PC01" },
+            LegacyFiles =
+            [
+                Legacy("S-1-5-21-1", @"C:\Users\Ada\AppData\Local\Microsoft\Outlook\ada@contoso.com.ost", "ost"),
+                Legacy("S-1-5-21-1", @"C:\Users\Ada\AppData\Local\Microsoft\Outlook\RoamCache\Stream_Autocomplete_0_A.dat", "AUTOCOMPLETE"),
+                Legacy("S-1-5-21-1", @"C:\Users\Ada\notes.tmp", "TMP")
+            ]
+        };
+
+        var service = new InventoryIngestionService(db);
+        await service.SavePayloadAsync(job.Id, new DeviceTarget("PC01"), payload, CancellationToken.None);
+
+        var stored = await db.LegacyFiles.AsNoTracking().OrderBy(x => x.ArtifactType).ToListAsync();
+
+        // OST size is the only mailbox-size signal the collector produces, and RoamCache is
+        // where every Outlook since 2010 keeps autocomplete. The rewrite accepted neither,
+        // so both silently disappeared from the inventory the ancestor used to report.
+        Assert.Equal(new[] { "AUTOCOMPLETE", "OST" }, stored.Select(x => x.ArtifactType));
+    }
+
     private static CollectorLegacyFile Legacy(string sid, string path, string type) =>
         new()
         {

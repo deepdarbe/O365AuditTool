@@ -61,6 +61,35 @@ public class CollectorOptions
     /// once the appliances have been identified (nbr.local does).
     /// </summary>
     public bool ExcludeUnknownOperatingSystem { get; set; }
+
+    /// <summary>
+    /// UNC path of the write-only drop box the collector writes its JSON result to. The
+    /// 2026-03 deployment that actually worked wrote results to a share and used the remote
+    /// console only as a control channel; carrying the whole payload back over PsExec stdout
+    /// is what turned one stray line or one code-page mismatch into "no JSON payload" for a
+    /// device. Empty keeps the stdout-only behaviour.
+    /// </summary>
+    public string ResultShareUncPath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Local path of <see cref="ResultShareUncPath"/> on this server. Result files are read
+    /// and deleted locally; the file name reported by the endpoint is never used as a path.
+    /// </summary>
+    public string ResultLocalPath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Search every non-system fixed drive for PST archives. Detached archives on D:/E: are
+    /// the ones a migration has to account for, and they are invisible to a registry-only
+    /// scan because no Outlook profile references them any more.
+    /// </summary>
+    public bool PstScanFixedDrives { get; set; } = true;
+
+    /// <summary>
+    /// Wall-clock budget for the collector's file-system PST search, in seconds. The search
+    /// stops when the budget is spent and records how far it got, so a device with a large
+    /// data drive degrades to partial results instead of consuming its whole scan slot.
+    /// </summary>
+    public int PstScanBudgetSeconds { get; set; } = 120;
 }
 
 public class AuthOptions

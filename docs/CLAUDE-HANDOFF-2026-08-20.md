@@ -127,6 +127,48 @@ dokunulmadi. Yani yeni teshis yolu amacina ulasti.
 appsettings'e yazilmiyor; CollectorOptions varsayilanlariyla (30 sn / probe acik) dogru calisiyorlar
 ama site bazinda ayarlanamiyorlar.
 
+## 3c. Ata projeden geri alinan kapsam ve dayaniklilik (21 Agustos)
+
+Sikayet: "eski duzen PST ve profilleri cikariyordu, yenisinde cok sorun var". Iki collector
+yan yana okundu. Kullanicinin hipotezi (Office surum kesfi) **elendi**: `Get-OfficeInfo`
+kendi try/catch'i icinde ve `Get-OutlookProfileInfo`'dan bagimsiz cagriliyor, yani tamamen
+cokse bile posta verisi toplanmaya devam eder. Paylasim izinleri de dogru olculdu
+(`Domain Computers` -> Read, hem SMB hem NTFS) ve sunucudaki collector.ps1 repo ile ayni SHA.
+
+Gercek sebep alti maddeydi; hepsi duzeltildi:
+
+| # | Gerileme | Duzeltme |
+|---|---|---|
+| 1 | PST aramasi 3 kanonik klasore daralmisti; ata proje `Documents` kokunu, `Desktop`'i, `AppData\Roaming\...\Outlook`'u ve **D:/E: tum surucuyu** rekursif tariyordu | Profil alt dizinleri geri geldi + `Get-NonSystemFixedDriveRoots` ile tum sistem-disi sabit suruculer, butce ve dislama listesiyle |
+| 2 | OST toplama tamamen kalkmisti (ata projede 22 referans) | `legacyFiles` icine `artifactType='OST'` olarak geri geldi - yeni tablo/migration yok |
+| 3 | NK2 yalnizca uzantiyla esleniyordu; RoamCache `Stream_Autocomplete_*.dat` gorunmuyordu | `Get-LegacyArtifactType` adla da esliyor, tip `AUTOCOMPLETE` |
+| 4 | Sonuc tek kanaldan, PsExec **stdout**'undan doniyordu; stdout OEM kod sayfasina sabit | Sonuc write-only drop box'a **UTF-8 (BOM'suz)** yaziliyor, stdout'ta tek satir `O365AUDIT-RESULT <dosya>`; yazma basarisizsa stdout'a **geri dusuyor** (iki kanal) |
+| 5 | `$ErrorActionPreference='Stop'` + tek buyuk try/catch: profil dongusunde tek hata `profiles`+`mailAccounts`+`pstFiles`+`legacyFiles` dordunu birden bosaltiyordu | Dongu govdesi profil basina try/catch; kismi sonuc doner |
+| 6 | `Office\14.0\Outlook\Profiles` koku dusmustu | Geri eklendi |
+
+**Drop box guvenligi:** ayri share (`o365audit-results`), NTFS'te Domain Computers icin
+yalnizca `CreateFiles, AppendData, WriteAttributes, WriteExtendedAttributes, Synchronize` -
+**ListDirectory/ReadData/Delete yok**. Endpoint kendi dosyasini birakir, baska cihazin
+envanterini okuyamaz. Endpoint'in bildirdigi dosya **adi** guvenilmez girdi sayilir:
+yalnizca cirilciplak dosya adi kabul edilir, beklenen hostname ile baslamalidir ve cozulen
+yol drop box'in icinde kalmalidir. Tuketilen dosya silinir; 6 saatte bir 24 saatten eski
+artiklar suprulur.
+
+**Kopyalama planlari:** `ArtifactCopyService.DefaultArtifactTypes` hala `PST, NK2, N2K`.
+OST ve AUTOCOMPLETE envanterde gorunur ama kopyalanamaz - OST yeniden uretilebilir bir
+onbellek, kopyalamak anlamsiz.
+
+**Dogrulama (bu makinede gercekten calistirildi):**
+- Collector 11 sn'de tamamlandi, stdout tek satir marker, payload drop box'ta gecerli JSON.
+- **OST bulundu** (`mehmet@itwise.com.tr.ost`) ve **AUTOCOMPLETE bulundu** - ikisi de
+  duzeltmeden once tamamen gorunmezdi.
+- `Documents\ZZ-test-arsiv.pst` ve `Desktop\ZZ-test-masaustu.pst` sonda dosyalari **bulundu**;
+  bu iki konum eski surumde taranmiyordu. (Bu makinede sistem-disi sabit surucu yok, yani
+  D:/E: yolu sahada NBR endpoint'lerinde ilk kez calisacak.)
+- Yetkisiz kosuldugu icin diger profillerin `reg load`'u basarisiz oldu; **payload yine de
+  eksiksiz dondu** - istenen dayaniklilik davranisi tam olarak bu.
+- 169 xUnit + 17 node testi gecti, `dotnet format` temiz.
+
 ## 4. Acik isler
 
 - [ ] **Olcum kapisi**: yeni surum kuruldiktan sonra tarama calistirilip 10

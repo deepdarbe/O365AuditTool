@@ -24,6 +24,81 @@ public class CollectorScriptTests
     }
 
     [Fact]
+    public void LegacyArtifactType_CoversOstAndRoamCacheAutocomplete()
+    {
+        var output = InvokeCollectorFunctions(
+            "@(" +
+            "(Get-LegacyArtifactType -File ([IO.FileInfo]::new('C:\\t\\a.nk2')))," +
+            "(Get-LegacyArtifactType -File ([IO.FileInfo]::new('C:\\t\\a.N2K')))," +
+            "(Get-LegacyArtifactType -File ([IO.FileInfo]::new('C:\\t\\ada@contoso.com.ost')))," +
+            "(Get-LegacyArtifactType -File ([IO.FileInfo]::new('C:\\t\\Stream_Autocomplete_0_ABC.dat')))," +
+            "$(if ($null -eq (Get-LegacyArtifactType -File ([IO.FileInfo]::new('C:\\t\\notes.txt')))) { '<null>' } else { 'UNEXPECTED' })" +
+            ") -join '|'"
+        );
+
+        Assert.Equal("NK2|N2K|OST|AUTOCOMPLETE|<null>", output);
+    }
+
+    [Fact]
+    public void FileScanBudget_StopsScanningAndRecordsThatResultsArePartial()
+    {
+        var output = InvokeCollectorFunctions(
+            "$script:fileScanDeadline = (Get-Date).AddSeconds(-1); " +
+            "$script:fileScanTruncated = $false; " +
+            "$expired = Test-FileScanBudget; " +
+            "$flagged = $script:fileScanTruncated; " +
+            "$script:fileScanDeadline = (Get-Date).AddSeconds(60); " +
+            "$remaining = Test-FileScanBudget; " +
+            "@($expired, $flagged, $remaining) -join '|'"
+        );
+
+        // A partial search that reports as complete is how an audit concludes a device has
+        // no archives when the walk simply ran out of time.
+        Assert.Equal("False|True|True", output);
+    }
+
+    [Fact]
+    public void ScannableDirectory_SkipsTheExpensiveSystemDirectories()
+    {
+        var output = InvokeCollectorFunctions(
+            "@(" +
+            "(Test-ScannableDirectory -Directory ([IO.DirectoryInfo]::new($env:SystemRoot)))," +
+            "(Test-ScannableDirectory -Directory ([IO.DirectoryInfo]::new(([IO.Path]::GetPathRoot($env:SystemRoot)))))" +
+            ") -join '|'"
+        );
+
+        Assert.Equal("False|True", output);
+    }
+
+    [Fact]
+    public void CollectorSearchScope_StillCoversEveryAncestorLocation()
+    {
+        var script = File.ReadAllText(FindRepositoryFile("scripts\\collector.ps1"));
+
+        // Every one of these existed in the 2026-03 collector, was dropped by the rewrite,
+        // and is a place real PST archives were found. Asserting on the script text keeps
+        // the narrowing from creeping back in during a future refactor.
+        Assert.Contains(@"'Software\Microsoft\Office\14.0\Outlook\Profiles'", script, StringComparison.Ordinal);
+        Assert.Contains(@"(Join-Path $profilePath 'Documents')", script, StringComparison.Ordinal);
+        Assert.Contains(@"(Join-Path $profilePath 'Desktop')", script, StringComparison.Ordinal);
+        Assert.Contains(@"(Join-Path $profilePath 'AppData\Roaming\Microsoft\Outlook')", script, StringComparison.Ordinal);
+        Assert.Contains("Get-NonSystemFixedDriveRoots", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CollectorOutput_PrefersTheDropBoxAndFallsBackToStdout()
+    {
+        var script = File.ReadAllText(FindRepositoryFile("scripts\\collector.ps1"));
+
+        // Two channels, never one: an unreachable drop box must degrade to the previous
+        // stdout behaviour rather than lose the device entirely.
+        Assert.Contains("O365AUDIT-RESULT ", script, StringComparison.Ordinal);
+        Assert.Contains("O365AUDIT-RESULT-FAILED ", script, StringComparison.Ordinal);
+        Assert.Contains("if (-not $payloadWritten) {", script, StringComparison.Ordinal);
+        Assert.Contains("[Text.UTF8Encoding]::new($false)", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AccountResolution_UsesProfileThenOnlySingleSidFallback()
     {
         var output = InvokeCollectorFunctions(

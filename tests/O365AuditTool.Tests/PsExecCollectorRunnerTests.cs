@@ -182,6 +182,55 @@ public class PsExecCollectorRunnerTests
     }
 
     [Fact]
+    public void BuildCollectorEncodedCommand_ForwardsDropBoxAndScanBudget()
+    {
+        var command = DecodeCollectorCommand(PsExecCollectorRunner.BuildCollectorEncodedCommand(
+            @"\\server\share\collector.ps1",
+            new string('A', 64),
+            @"\\server\o365audit-results",
+            scanFixedDrives: true,
+            pstScanBudgetSeconds: 90));
+
+        Assert.Contains(@"-OutputPath '\\server\o365audit-results'", command, StringComparison.Ordinal);
+        Assert.Contains("-PstScanBudgetSeconds 90", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("-SkipFixedDriveScan", command, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildCollectorEncodedCommand_OmitsDropBoxWhenUnsetAndClampsBudget()
+    {
+        var command = DecodeCollectorCommand(PsExecCollectorRunner.BuildCollectorEncodedCommand(
+            @"\\server\share\collector.ps1",
+            new string('A', 64),
+            resultShareUncPath: string.Empty,
+            scanFixedDrives: false,
+            pstScanBudgetSeconds: 5000));
+
+        Assert.DoesNotContain("-OutputPath", command, StringComparison.Ordinal);
+        Assert.Contains("-SkipFixedDriveScan", command, StringComparison.Ordinal);
+        Assert.Contains("-PstScanBudgetSeconds 3600", command, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(@"\\server\share", true)]
+    [InlineData(@"\\server\share\sub", true)]
+    [InlineData(@"C:\local\path", false)]
+    [InlineData(@"\\server\share'; Remove-Item C:\ -Recurse #", false)]
+    [InlineData("\\\\server\\share\r\nWrite-Host hi", false)]
+    [InlineData(@"\\server\share$(whoami)", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void IsUncPath_RejectsAnythingThatCouldEscapeTheQuotedArgument(string? value, bool expected)
+    {
+        // The value is interpolated into a single-quoted PowerShell string that runs as
+        // SYSTEM on every endpoint, so it is rejected rather than escaped.
+        Assert.Equal(expected, PsExecCollectorRunner.IsUncPath(value));
+    }
+
+    private static string DecodeCollectorCommand(string encoded) =>
+        System.Text.Encoding.Unicode.GetString(Convert.FromBase64String(encoded));
+
+    [Fact]
     public void GetFailureStatus_DistinguishesTimeoutFromOffline()
     {
         var timedOut = new CollectResult(false, null, "timeout", IsOffline: false, IsTimedOut: true);

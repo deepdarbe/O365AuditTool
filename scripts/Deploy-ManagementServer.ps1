@@ -29,6 +29,16 @@ param(
     [int]$ReachabilityProbeTimeoutSeconds = 5,
     [string]$CollectorSharePath = "",
     [string]$CollectorShareName = "o365audit",
+    # Write-only drop box the collector writes its result JSON to. Endpoints may create files
+    # here but may not list, read or delete them, so a compromised workstation cannot harvest
+    # another device's inventory from the domain controller.
+    [string]$CollectorResultShareName = "o365audit-results",
+    [string]$CollectorResultSharePath = "",
+    [ValidateRange(5, 3600)]
+    [int]$PstScanBudgetSeconds = 120,
+    # Defaults TRUE in CollectorOptions for the same reason the exclusion flags do: an omitted
+    # switch would silently turn the whole-drive archive search back off on the next redeploy.
+    [bool]$PstScanFixedDrives = $true,
     [string]$DomainComputersGroup = "",
     [string[]]$FallbackTargets = @(),
     [string]$DefaultOuFilter = "",
@@ -1331,6 +1341,97 @@ function Ensure-CollectorShare {
     }
 }
 
+function New-ResultDropBoxAcl {
+    param(
+        [Security.Principal.SecurityIdentifier]$AdministratorsSid,
+        [Security.Principal.SecurityIdentifier]$SystemSid,
+        [Security.Principal.SecurityIdentifier]$ServiceSid,
+        [Security.Principal.SecurityIdentifier]$DomainComputersSid
+    )
+
+    $acl = New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $none = [Security.AccessControl.PropagationFlags]::None
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+
+    $null = $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($SystemSid, 'FullControl', $inheritance, $none, $allow)))
+    $null = $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($AdministratorsSid, 'FullControl', $inheritance, $none, $allow)))
+    # The service reads the result and deletes it; nobody else needs to.
+    $null = $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($ServiceSid, 'Modify', $inheritance, $none, $allow)))
+
+    # Deliberately write-only for endpoints: create and write, but no ListDirectory, no
+    # ReadData and no Delete. Every domain computer can reach this path, so it must not be
+    # possible to read another workstation's mail inventory out of it.
+    $dropBoxRights = [Security.AccessControl.FileSystemRights]'CreateFiles, AppendData, WriteAttributes, WriteExtendedAttributes, Synchronize'
+    $null = $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($DomainComputersSid, $dropBoxRights, $inheritance, $none, $allow)))
+
+    return $acl
+}
+
+function Initialize-CollectorResultDropBox {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Security.Principal.SecurityIdentifier]$AdministratorsSid,
+        [Security.Principal.SecurityIdentifier]$SystemSid,
+        [Security.Principal.SecurityIdentifier]$ServiceSid,
+        [Security.Principal.SecurityIdentifier]$DomainComputersSid
+    )
+
+    $acl = New-ResultDropBoxAcl `
+        -AdministratorsSid $AdministratorsSid `
+        -SystemSid $SystemSid `
+        -ServiceSid $ServiceSid `
+        -DomainComputersSid $DomainComputersSid
+
+    if (Test-Path -LiteralPath $Path) {
+        Assert-NoReparsePointInPath -Path $Path
+        Set-DirectoryAcl -Path $Path -Acl $acl
+    }
+    else {
+        New-DirectoryWithAcl -Path $Path -Acl $acl
+    }
+
+    Assert-NoReparsePointInPath -Path $Path
+    Set-DirectoryAcl -Path $Path -Acl $acl
+}
+
+function Ensure-CollectorResultShare {
+    param(
+        [string]$Name,
+        [string]$Path,
+        [string]$AdministratorsAccount,
+        [string]$DomainComputersAccount
+    )
+
+    $existingShare = Get-SmbShare -Name $Name -ErrorAction SilentlyContinue
+    if ($existingShare) {
+        $existingPath = [IO.Path]::GetFullPath($existingShare.Path).TrimEnd('\')
+        $requestedPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+        if (-not $existingPath.Equals($requestedPath, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "SMB share '$Name' zaten farkli bir path kullaniyor: '$existingPath'. Guvenlik nedeniyle otomatik degistirilmedi."
+        }
+    }
+    else {
+        New-SmbShare -Name $Name -Path $Path -FullAccess $AdministratorsAccount -ChangeAccess $DomainComputersAccount -FolderEnumerationMode AccessBased | Out-Null
+    }
+
+    Grant-SmbShareAccess -Name $Name -AccountName $AdministratorsAccount -AccessRight Full -Force | Out-Null
+    # Share-level Change is the ceiling; the NTFS ACL above is what actually makes this
+    # write-only. Both layers are needed because either one alone can be widened by hand.
+    Grant-SmbShareAccess -Name $Name -AccountName $DomainComputersAccount -AccessRight Change -Force | Out-Null
+
+    foreach ($sidValue in @('S-1-1-0', 'S-1-5-32-546')) {
+        try {
+            $unsafeAccount = Resolve-AccountNameBySid -SidValue $sidValue
+            Revoke-SmbShareAccess -Name $Name -AccountName $unsafeAccount -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+        catch {
+            Write-Verbose "SMB ACE temizleme atlandi: $sidValue"
+        }
+    }
+}
+
 function Invoke-ServiceControl([string[]]$Arguments) {
     $output = & "$env:SystemRoot\System32\sc.exe" @Arguments 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -1685,6 +1786,24 @@ if (-not (Test-PathWithinRoot -Path $CollectorSharePath.TrimEnd('\') -Root $Inst
 if ($CollectorShareName -notmatch '^[A-Za-z0-9_-]+$') {
     throw "CollectorShareName yalnizca harf, rakam, alt cizgi ve tire icerebilir."
 }
+if ([string]::IsNullOrWhiteSpace($CollectorResultSharePath)) {
+    $CollectorResultSharePath = Join-Path $InstallRoot 'results'
+}
+$CollectorResultSharePath = [IO.Path]::GetFullPath($CollectorResultSharePath)
+if (-not (Test-PathWithinRoot -Path $CollectorResultSharePath.TrimEnd('\') -Root $InstallRoot.TrimEnd('\'))) {
+    throw "CollectorResultSharePath InstallRoot altinda olmalidir: '$CollectorResultSharePath'."
+}
+if ($CollectorResultSharePath.TrimEnd('\').Equals($CollectorSharePath.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) {
+    # The collector share is readable by every domain computer. Sharing one directory for
+    # both roles would make the write-only drop box readable by all of them too.
+    throw "CollectorResultSharePath, CollectorSharePath ile ayni olamaz: '$CollectorResultSharePath'."
+}
+if ($CollectorResultShareName -notmatch '^[A-Za-z0-9_-]+$') {
+    throw "CollectorResultShareName yalnizca harf, rakam, alt cizgi ve tire icerebilir."
+}
+if ($CollectorResultShareName.Equals($CollectorShareName, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "CollectorResultShareName, CollectorShareName ile ayni olamaz."
+}
 if ($ServiceName -notmatch '^[A-Za-z0-9_.-]+$') {
     throw "ServiceName yalnizca harf, rakam, nokta, alt cizgi ve tire icerebilir."
 }
@@ -1869,6 +1988,7 @@ Initialize-ManagedDirectory -Path $appDataDir -AdministratorsSid $administrators
 Initialize-ManagedDirectory -Path $dataDir -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'Modify'
 Initialize-ManagedDirectory -Path $logDir -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'Modify'
 Initialize-ManagedDirectory -Path $CollectorSharePath -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'ReadAndExecute' -AdditionalReadSid $domainComputers.Sid
+Initialize-CollectorResultDropBox -Path $CollectorResultSharePath -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -DomainComputersSid $domainComputers.Sid
 
 $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 $restartOnFailure = $existingService -and $existingService.Status -eq 'Running'
@@ -1960,6 +2080,7 @@ try {
         $shareReaders += $serviceIdentity.ShareAccount
     }
     Ensure-CollectorShare -Name $CollectorShareName -Path $CollectorSharePath -AdministratorsAccount $administratorsName -ReadAccounts $shareReaders
+    Ensure-CollectorResultShare -Name $CollectorResultShareName -Path $CollectorResultSharePath -AdministratorsAccount $administratorsName -DomainComputersAccount $domainComputers.Name
 
     $productionSettings = @{
         ConnectionStrings = @{ AuditDb = "Data Source=$dataDir\audit.db;Default Timeout=30;Pooling=True" }
@@ -2001,6 +2122,10 @@ try {
             ExcludeServerOperatingSystems = [bool]$ExcludeServerOperatingSystems
             ExcludeDomainControllers = [bool]$ExcludeDomainControllers
             ExcludeUnknownOperatingSystem = [bool]$ExcludeUnknownOperatingSystem
+            ResultShareUncPath = "\\$env:COMPUTERNAME\$CollectorResultShareName"
+            ResultLocalPath = $CollectorResultSharePath
+            PstScanFixedDrives = [bool]$PstScanFixedDrives
+            PstScanBudgetSeconds = $PstScanBudgetSeconds
         }
         Copy = @{
             Enabled = $effectiveArtifactCopyEnabled
@@ -2033,6 +2158,7 @@ try {
     Set-ManagedDirectoryAcl -Path $dataDir -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'Modify'
     Set-ManagedDirectoryAcl -Path $logDir -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'Modify'
     Set-ManagedDirectoryAcl -Path $CollectorSharePath -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -ServiceRights 'ReadAndExecute' -AdditionalReadSid $domainComputers.Sid
+    Initialize-CollectorResultDropBox -Path $CollectorResultSharePath -AdministratorsSid $administratorsSid -SystemSid $systemSid -ServiceSid $serviceIdentity.AclSid -DomainComputersSid $domainComputers.Sid
 
     if ($existingService -and $existingService.Status -ne 'Stopped') {
         Stop-Service -Name $ServiceName -Force
@@ -2135,6 +2261,8 @@ Write-Host "Deployment tamamlandi." -ForegroundColor Green
 $dashboardScheme = if ($AllowInsecureHttpDashboard) { 'http' } else { 'https' }
 Write-Host "Dashboard: $dashboardScheme`://$resolvedDashboardDnsName`:$Port" -ForegroundColor Cyan
 Write-Host "Collector share: \\$env:COMPUTERNAME\$CollectorShareName\collector.ps1" -ForegroundColor Cyan
+Write-Host "Sonuc drop box : \\$env:COMPUTERNAME\$CollectorResultShareName (yalnizca yazma; endpoint listeleyemez/okuyamaz)" -ForegroundColor Cyan
+Write-Host "PST tarama     : sabit surucu taramasi=$PstScanFixedDrives, butce=$PstScanBudgetSeconds sn" -ForegroundColor Cyan
 Write-Host "Service: $ServiceName ($($serviceIdentity.Type): $($serviceIdentity.ScAccount))" -ForegroundColor Cyan
 Write-Host "Tarama kapsami: OU='$($DefaultOuFilter.Trim())' Site='$($DefaultSiteFilter.Trim())'" -ForegroundColor Cyan
 if ($resolvedExcludeDeviceNames.Count -gt 0 -or $resolvedExcludeOus.Count -gt 0) {

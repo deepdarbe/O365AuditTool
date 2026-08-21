@@ -809,7 +809,7 @@ async function loadLegacyFiles() {
   const hadData = byId("legacyRows").childElementCount > 0;
   setButtonBusy(filterButton, true, "Filtreleniyor");
   setPanelState("legacy", "legacyPanelStamp", "loading", "Yükleniyor");
-  setFeedback("legacyFeedback", "NK2/N2K envanteri yükleniyor...");
+  setFeedback("legacyFeedback", "Legacy Outlook dosyaları yükleniyor...");
   try {
     const files = asArray(await fetchJson(`/api/inventory/legacy-files?${getLegacyFilterQuery()}`));
     renderLegacyRows(files);

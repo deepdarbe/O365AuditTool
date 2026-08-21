@@ -1,7 +1,81 @@
 ﻿[CmdletBinding()]
-param([switch]$FunctionsOnly)
+param(
+    [switch]$FunctionsOnly,
+
+    # Write-only drop box for the result JSON. When this is set and the write succeeds,
+    # stdout carries a single marker line instead of the payload, so a stray line or a
+    # code-page mismatch on the remote console can no longer destroy a device's result.
+    [string]$OutputPath,
+
+    # Declared as a switch on purpose: a [bool] parameter bound from a command line turns
+    # the string "false" into $true, which is how this codebase previously re-enabled a
+    # setting it meant to disable.
+    [switch]$SkipFixedDriveScan,
+
+    [ValidateRange(5, 3600)]
+    [int]$PstScanBudgetSeconds = 120
+)
 
 $ErrorActionPreference = 'Stop'
+
+# Directories that never hold user mail archives but are expensive to walk. Skipping them
+# is what makes a whole-drive PST search affordable inside a per-device scan budget.
+$script:excludedScanDirectories = @(
+    'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData', 'PerfLogs',
+    '$Recycle.Bin', 'System Volume Information', 'Recovery', '$WinREAgent',
+    'MSOCache', 'node_modules', 'OneDriveTemp', 'Config.Msi'
+)
+
+$script:fileScanDeadline = [DateTime]::MaxValue
+$script:fileScanTruncated = $false
+
+function Test-FileScanBudget {
+    if ((Get-Date) -lt $script:fileScanDeadline) { return $true }
+
+    $script:fileScanTruncated = $true
+    return $false
+}
+
+function Test-ScannableDirectory {
+    param([Parameter(Mandatory)][IO.DirectoryInfo]$Directory)
+
+    if (($Directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+    return @($script:excludedScanDirectories) -notcontains $Directory.Name
+}
+
+function Get-LegacyArtifactType {
+    param([Parameter(Mandatory)][IO.FileInfo]$File)
+
+    switch -Regex ($File.Extension) {
+        '(?i)^\.nk2$' { return 'NK2' }
+        '(?i)^\.n2k$' { return 'N2K' }
+        '(?i)^\.ost$' { return 'OST' }
+    }
+
+    # Outlook 2010 and later keep autocomplete in RoamCache as Stream_Autocomplete_*.dat.
+    # The ancestor collector matched that name; the rewrite narrowed it to an extension
+    # test and silently stopped reporting autocomplete data on every modern Outlook.
+    if ($File.Name -match '(?i)^Stream_Autocomplete') { return 'AUTOCOMPLETE' }
+    return $null
+}
+
+function Get-NonSystemFixedDriveRoots {
+    $systemDrive = ([string]$env:SystemDrive).TrimEnd('\')
+    $roots = @()
+    try {
+        foreach ($volume in (Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop)) {
+            $deviceId = [string]$volume.DeviceID
+            if ([string]::IsNullOrWhiteSpace($deviceId)) { continue }
+            if ($deviceId.TrimEnd('\').Equals($systemDrive, [StringComparison]::OrdinalIgnoreCase)) { continue }
+            $roots += "$($deviceId.TrimEnd('\'))\"
+        }
+    }
+    catch {
+        Add-CollectorError -Message "pstFiles fixed drives: $($_.Exception.Message)"
+    }
+
+    return @($roots)
+}
 
 function Convert-ToMediaType {
     param(
@@ -405,7 +479,7 @@ function Get-LegacyOutlookFiles {
     $pendingDirectories = [System.Collections.Generic.Stack[string]]::new()
     $pendingDirectories.Push($RootPath)
 
-    while ($pendingDirectories.Count -gt 0) {
+    while ($pendingDirectories.Count -gt 0 -and (Test-FileScanBudget)) {
         $currentDirectory = $pendingDirectories.Pop()
         try {
             $children = @(Get-ChildItem -LiteralPath $currentDirectory -Force -ErrorAction Stop)
@@ -418,13 +492,13 @@ function Get-LegacyOutlookFiles {
         foreach ($child in $children) {
             try {
                 if ($child.PSIsContainer) {
-                    if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                    if (Test-ScannableDirectory -Directory $child) {
                         $pendingDirectories.Push($child.FullName)
                     }
                     continue
                 }
 
-                if ($child.Extension -in @('.nk2', '.n2k')) {
+                if (Get-LegacyArtifactType -File $child) {
                     $child
                 }
             }
@@ -460,7 +534,7 @@ function Get-OutlookPstFiles {
     $pendingDirectories = [System.Collections.Generic.Stack[string]]::new()
     $pendingDirectories.Push($RootPath)
 
-    while ($pendingDirectories.Count -gt 0) {
+    while ($pendingDirectories.Count -gt 0 -and (Test-FileScanBudget)) {
         $currentDirectory = $pendingDirectories.Pop()
         try {
             $children = @(Get-ChildItem -LiteralPath $currentDirectory -Force -ErrorAction Stop)
@@ -473,7 +547,7 @@ function Get-OutlookPstFiles {
         foreach ($child in $children) {
             try {
                 if ($child.PSIsContainer) {
-                    if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                    if (Test-ScannableDirectory -Directory $child) {
                         $pendingDirectories.Push($child.FullName)
                     }
                     continue
@@ -788,6 +862,7 @@ function Get-DefaultOutlookProfileNames {
     $defaultProfileRoots = @(
         'Software\Microsoft\Office\16.0\Outlook',
         'Software\Microsoft\Office\15.0\Outlook',
+        'Software\Microsoft\Office\14.0\Outlook',
         'Software\Microsoft\Windows NT\CurrentVersion\Windows Messaging Subsystem\Profiles'
     )
     $names = @()
@@ -819,11 +894,21 @@ function Get-OutlookProfileInfo {
     $profileRoots = @(
         'Software\Microsoft\Office\16.0\Outlook\Profiles',
         'Software\Microsoft\Office\15.0\Outlook\Profiles',
+        'Software\Microsoft\Office\14.0\Outlook\Profiles',
         'Software\Microsoft\Windows NT\CurrentVersion\Windows Messaging Subsystem\Profiles'
     )
 
+    # One shared budget for every file-system walk on this device. Without it a data drive
+    # full of project folders can eat the whole per-device scan slot.
+    $script:fileScanDeadline = (Get-Date).AddSeconds($PstScanBudgetSeconds)
+    $script:fileScanTruncated = $false
+
     foreach ($userProfile in (Get-UserProfiles)) {
+        # One unreadable profile must not cost the device its entire mail inventory. The
+        # rewrite guarded the registry walk but left everything after it unguarded, so a
+        # single throw returned empty profiles, accounts, PSTs and legacy files together.
         $sid = [string]$userProfile.sid
+        try {
         $profilePath = [string]$userProfile.localPath
         $userName = [string]$userProfile.userName
         $profileLoaded = [bool]$userProfile.loaded
@@ -992,9 +1077,16 @@ function Get-OutlookProfileInfo {
             }
 
             if ($profilePathAccessible) {
+                # The registry only knows PSTs that are still attached to a profile. A
+                # migration has to account for the detached ones too, which is why the
+                # 2026-03 collector walked the whole user profile and the data drives.
                 $fallbackDirectories = @(
+                    (Join-Path $profilePath 'Documents'),
                     (Join-Path $profilePath 'Documents\Outlook Files'),
+                    (Join-Path $profilePath 'Desktop'),
+                    (Join-Path $profilePath 'Downloads'),
                     (Join-Path $profilePath 'AppData\Local\Microsoft\Outlook'),
+                    (Join-Path $profilePath 'AppData\Roaming\Microsoft\Outlook'),
                     (Join-Path $profilePath 'Local Settings\Application Data\Microsoft\Outlook')
                 )
 
@@ -1026,6 +1118,9 @@ function Get-OutlookProfileInfo {
                     $legacyRoot = Join-Path $profilePath $relativeDirectory
                     foreach ($file in (Get-LegacyOutlookFiles -RootPath $legacyRoot -Sid $sid)) {
                         try {
+                            $artifactType = Get-LegacyArtifactType -File $file
+                            if (-not $artifactType) { continue }
+
                             $fullPath = [IO.Path]::GetFullPath($file.FullName)
                             $legacyKey = "$sid|$($fullPath.ToLowerInvariant())"
                             if (-not $legacyCandidates.ContainsKey($legacyKey)) {
@@ -1033,7 +1128,7 @@ function Get-OutlookProfileInfo {
                                     sid = $sid
                                     userName = $userName
                                     profileName = $file.BaseName
-                                    artifactType = $file.Extension.TrimStart('.').ToUpperInvariant()
+                                    artifactType = $artifactType
                                     path = $fullPath
                                 }
                             }
@@ -1066,6 +1161,60 @@ function Get-OutlookProfileInfo {
                 }
             }
         }
+        }
+        catch {
+            Add-CollectorError -Message "outlook [$sid] profile scan: $($_.Exception.Message)"
+        }
+    }
+
+    # Detached archives sit on the data drives, not under a Windows profile: no Outlook
+    # profile references them, so a registry-only scan cannot see them and a profile-scoped
+    # file walk never visits them. This is the single biggest source of PSTs a migration
+    # has to account for, and it is what the 2026-03 collector found by walking D: and E:.
+    if (-not $SkipFixedDriveScan) {
+        $profilePathsBySid = @{}
+        foreach ($profileEntry in $profileResults.Values) {
+            $candidatePath = [string]$profileEntry.profilePath
+            if ([string]::IsNullOrWhiteSpace($candidatePath)) { continue }
+
+            $normalizedPath = $candidatePath.TrimEnd('\').ToLowerInvariant()
+            if (-not $profilePathsBySid.ContainsKey($normalizedPath)) {
+                $profilePathsBySid[$normalizedPath] = [string]$profileEntry.sid
+            }
+        }
+
+        foreach ($driveRoot in (Get-NonSystemFixedDriveRoots)) {
+            try {
+                foreach ($file in (Get-OutlookPstFiles -RootPath $driveRoot -Sid 'fixed-drive')) {
+                    $loweredPath = $file.FullName.ToLowerInvariant()
+                    $ownerSid = ''
+                    foreach ($profilePathKey in $profilePathsBySid.Keys) {
+                        if ($loweredPath.StartsWith("$profilePathKey\", [StringComparison]::Ordinal)) {
+                            $ownerSid = $profilePathsBySid[$profilePathKey]
+                            break
+                        }
+                    }
+
+                    $pstKey = "$ownerSid|$loweredPath"
+                    if (-not $pstCandidates.ContainsKey($pstKey)) {
+                        $pstCandidates[$pstKey] = [pscustomobject]@{
+                            sid = $ownerSid
+                            profileName = $null
+                            path = $file.FullName
+                        }
+                    }
+                }
+            }
+            catch {
+                Add-CollectorError -Message "pstFiles fixed drive '$driveRoot': $($_.Exception.Message)"
+            }
+        }
+    }
+
+    if ($script:fileScanTruncated) {
+        # Say so explicitly: a partial search that reports as complete is how an audit
+        # concludes a device has no archives when nobody ever looked.
+        Add-CollectorError -Message "pstFiles: file search stopped after the $PstScanBudgetSeconds second budget, results are incomplete"
     }
 
     $accounts = @($accountResults.Values | Sort-Object sid, profileName, address, accountType)
@@ -1168,4 +1317,29 @@ $payload = [ordered]@{
     errors = @($errors)
 }
 
-$payload | ConvertTo-Json -Depth 8 -Compress
+$json = $payload | ConvertTo-Json -Depth 8 -Compress
+
+$payloadWritten = $false
+if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+    try {
+        $resultFileName = "$($env:COMPUTERNAME)_$([Guid]::NewGuid().ToString('N')).json"
+        $resultTarget = Join-Path $OutputPath $resultFileName
+        # UTF-8 without a BOM. Written to a file the payload no longer travels through the
+        # remote console, so it is no longer subject to the OEM code page that PsExec output
+        # has to be decoded with - which is what mangled Turkish paths and profile names.
+        $utf8NoBom = [Text.UTF8Encoding]::new($false)
+        [IO.File]::WriteAllBytes($resultTarget, $utf8NoBom.GetBytes($json))
+        Write-Output "O365AUDIT-RESULT $resultFileName"
+        $payloadWritten = $true
+    }
+    catch {
+        # An unreachable drop box must degrade to the previous behaviour, never to a lost
+        # device. Braces are stripped so the reason can never be mistaken for the payload.
+        $dropBoxError = ([string]$_.Exception.Message) -replace '[{}]', ' '
+        Write-Output "O365AUDIT-RESULT-FAILED $dropBoxError"
+    }
+}
+
+if (-not $payloadWritten) {
+    Write-Output $json
+}

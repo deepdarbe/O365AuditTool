@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using O365AuditTool.Models;
 
 namespace O365AuditTool.Services;
@@ -108,7 +109,10 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
         process.StartInfo.ArgumentList.Add("-EncodedCommand");
         process.StartInfo.ArgumentList.Add(BuildCollectorEncodedCommand(
             _options.RemoteScriptPath,
-            _options.RemoteScriptSha256));
+            _options.RemoteScriptSha256,
+            _options.ResultShareUncPath,
+            _options.PstScanFixedDrives,
+            _options.PstScanBudgetSeconds));
 
         try
         {
@@ -168,7 +172,15 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
                 return new CollectResult(false, null, error, offline, ExitCode: process.ExitCode);
             }
 
-            var json = ExtractJsonObject(stdout);
+            // Preferred channel: the collector wrote the payload to the drop box and stdout
+            // carries only a marker. The remote console then cannot corrupt the payload with
+            // a stray line, a truncated pipe or an OEM code page that has no Turkish 'ı'.
+            var json = await TryReadResultFileAsync(stdout, deviceName, cancellationToken);
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                json = ExtractJsonObject(stdout);
+            }
+
             if (string.IsNullOrWhiteSpace(json))
             {
                 // PsExec succeeded but the collector produced no payload. Keep what it did
@@ -476,7 +488,12 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
         }
     }
 
-    internal static string BuildCollectorEncodedCommand(string scriptPath, string expectedSha256)
+    internal static string BuildCollectorEncodedCommand(
+        string scriptPath,
+        string expectedSha256,
+        string? resultShareUncPath = null,
+        bool scanFixedDrives = true,
+        int pstScanBudgetSeconds = 120)
     {
         if (string.IsNullOrWhiteSpace(scriptPath) || !IsSha256(expectedSha256))
         {
@@ -484,11 +501,41 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
         }
 
         var escapedPath = scriptPath.Replace("'", "''", StringComparison.Ordinal);
+        var arguments = new StringBuilder();
+        arguments.Append(CultureInfo.InvariantCulture, $" -PstScanBudgetSeconds {Math.Clamp(pstScanBudgetSeconds, 5, 3600)}");
+        if (!scanFixedDrives)
+        {
+            arguments.Append(" -SkipFixedDriveScan");
+        }
+
+        if (IsUncPath(resultShareUncPath))
+        {
+            var escapedShare = resultShareUncPath!.Trim().Replace("'", "''", StringComparison.Ordinal);
+            arguments.Append(CultureInfo.InvariantCulture, $" -OutputPath '{escapedShare}'");
+        }
+
         var command =
             $"$p='{escapedPath}';$e='{expectedSha256.ToUpperInvariant()}';" +
             "$a=(Get-FileHash -LiteralPath $p -Algorithm SHA256 -ErrorAction Stop).Hash;" +
-            "if(-not [String]::Equals($a,$e,[StringComparison]::OrdinalIgnoreCase)){throw 'Collector integrity validation failed.'};& $p";
+            "if(-not [String]::Equals($a,$e,[StringComparison]::OrdinalIgnoreCase)){throw 'Collector integrity validation failed.'};" +
+            $"& $p{arguments}";
         return Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
+    }
+
+    // Only a plain UNC path is ever forwarded. The value ends up inside a single-quoted
+    // PowerShell string, so anything carrying a quote, a line break or a redirection
+    // character is rejected outright rather than escaped and hoped for.
+    internal static bool IsUncPath(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var trimmed = value.Trim();
+        return trimmed.StartsWith(@"\\", StringComparison.Ordinal)
+            && trimmed.Length > 2
+            && trimmed.IndexOfAny(['\'', '"', '\r', '\n', '|', '&', ';', '`', '$']) < 0;
     }
 
     private static bool IsSha256(string? value) =>
@@ -537,6 +584,173 @@ public class PsExecCollectorRunner(IOptions<CollectorOptions> options, ILogger<P
 
         error = string.Empty;
         return true;
+    }
+
+    private static readonly Regex ResultMarkerPattern = new(
+        @"^O365AUDIT-RESULT[ \t]+(?<name>[A-Za-z0-9._-]{1,128}\.json)[ \t]*$",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture);
+
+    private static readonly Regex ResultFailureMarkerPattern = new(
+        @"^O365AUDIT-RESULT-FAILED[ \t]+(?<reason>.*)$",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture);
+
+    private static long _lastResultSweepTicks;
+
+    private async Task<string?> TryReadResultFileAsync(
+        string stdout,
+        string deviceName,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_options.ResultLocalPath) || string.IsNullOrEmpty(stdout))
+        {
+            return null;
+        }
+
+        var failure = ResultFailureMarkerPattern.Match(stdout);
+        if (failure.Success)
+        {
+            // The collector deliberately fell back to stdout. Say why: a drop box that
+            // quietly stops accepting writes looks exactly like a healthy scan until the
+            // first device with a Turkish path fails to parse.
+            logger.LogWarning(
+                "Collector could not write to the result drop box for {Device}: {Reason}",
+                deviceName,
+                failure.Groups["reason"].Value.Trim());
+            return null;
+        }
+
+        var marker = ResultMarkerPattern.Match(stdout);
+        if (!marker.Success)
+        {
+            return null;
+        }
+
+        if (!TryResolveResultFile(marker.Groups["name"].Value, deviceName, out var resultPath, out var resolveError))
+        {
+            logger.LogWarning("Collector result file for {Device} was rejected: {Error}", deviceName, resolveError);
+            return null;
+        }
+
+        try
+        {
+            return await File.ReadAllTextAsync(resultPath, new UTF8Encoding(false), cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(ex, "Collector result file for {Device} could not be read", deviceName);
+            return null;
+        }
+        finally
+        {
+            TryDeleteResultFile(resultPath);
+            SweepStaleResultFiles();
+        }
+    }
+
+    /// <summary>
+    /// Resolves the file name reported by the endpoint against the local drop box. The name
+    /// is untrusted input from a machine we are auditing precisely because we do not fully
+    /// trust it, so only a bare file name belonging to the expected host is accepted and the
+    /// resolved path must still sit inside the drop box.
+    /// </summary>
+    private bool TryResolveResultFile(
+        string fileName,
+        string deviceName,
+        out string fullPath,
+        out string error)
+    {
+        fullPath = string.Empty;
+
+        if (fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+            !string.Equals(Path.GetFileName(fileName), fileName, StringComparison.Ordinal))
+        {
+            error = $"'{fileName}' is not a bare file name.";
+            return false;
+        }
+
+        var expectedHost = deviceName.Trim().TrimStart('\\').Split('.')[0];
+        if (!fileName.StartsWith($"{expectedHost}_", StringComparison.OrdinalIgnoreCase))
+        {
+            error = $"'{fileName}' does not belong to '{expectedHost}'.";
+            return false;
+        }
+
+        string root;
+        string candidate;
+        try
+        {
+            root = Path.GetFullPath(_options.ResultLocalPath);
+            candidate = Path.GetFullPath(Path.Combine(root, fileName));
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            error = $"result path could not be resolved: {ex.Message}";
+            return false;
+        }
+
+        var rootPrefix = root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!candidate.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            error = $"'{fileName}' resolves outside the result drop box.";
+            return false;
+        }
+
+        if (!File.Exists(candidate))
+        {
+            error = $"'{fileName}' was reported but is not present in the drop box.";
+            return false;
+        }
+
+        fullPath = candidate;
+        error = string.Empty;
+        return true;
+    }
+
+    private void TryDeleteResultFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogDebug(ex, "Collector result file {Path} could not be deleted", path);
+        }
+    }
+
+    /// <summary>
+    /// Removes results a scan never consumed (PsExec died after the endpoint wrote its file).
+    /// Without this the drop box grows without bound on a domain controller.
+    /// </summary>
+    private void SweepStaleResultFiles()
+    {
+        var nowTicks = DateTime.UtcNow.Ticks;
+        var lastTicks = Interlocked.Read(ref _lastResultSweepTicks);
+        if (nowTicks - lastTicks < TimeSpan.FromHours(6).Ticks)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _lastResultSweepTicks, nowTicks, lastTicks) != lastTicks)
+        {
+            return;
+        }
+
+        try
+        {
+            var cutoff = DateTime.UtcNow.AddHours(-24);
+            foreach (var file in Directory.EnumerateFiles(_options.ResultLocalPath, "*.json"))
+            {
+                if (File.GetLastWriteTimeUtc(file) < cutoff)
+                {
+                    TryDeleteResultFile(file);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogDebug(ex, "Result drop box sweep skipped");
+        }
     }
 
     internal static string? ExtractJsonObject(string raw)

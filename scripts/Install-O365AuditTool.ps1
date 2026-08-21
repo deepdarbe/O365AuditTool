@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$BundleUri = "",
 
@@ -32,6 +32,15 @@ param(
     [int]$ReachabilityProbeTimeoutSeconds = 5,
     [string]$CollectorSharePath = '',
     [string]$CollectorShareName = 'o365audit',
+    # Write-only drop box for collector results. Endpoints create files here but cannot list,
+    # read or delete them.
+    [string]$CollectorResultSharePath = '',
+    [string]$CollectorResultShareName = 'o365audit-results',
+    [ValidateRange(5, 3600)]
+    [int]$PstScanBudgetSeconds = 120,
+    # Defaults TRUE in CollectorOptions; a [switch] left off would forward FALSE and silently
+    # stop searching the data drives for detached PST archives.
+    [bool]$PstScanFixedDrives = $true,
     [string]$DomainComputersGroup = "",
     [string[]]$FallbackTargets = @(),
     [string]$DefaultOuFilter = "",
@@ -380,6 +389,10 @@ try {
         'ReachabilityProbeTimeoutSeconds',
         'CollectorSharePath',
         'CollectorShareName',
+        'CollectorResultSharePath',
+        'CollectorResultShareName',
+        'PstScanBudgetSeconds',
+        'PstScanFixedDrives',
         'DomainComputersGroup',
         'FallbackTargets',
         'DefaultOuFilter',

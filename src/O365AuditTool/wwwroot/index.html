@@ -325,7 +325,7 @@
   <header>
     <div class="hero-inner">
       <h1>O365 Migration Audit</h1>
-      <p>PST, Outlook profilleri, NK2/N2K legacy artefact'leri ve kontrollü migration copy planları için merkezi görünürlük.</p>
+      <p>PST arşivleri, Outlook profilleri, OST/NK2/N2K legacy artefact'leri ve kontrollü migration copy planları için merkezi görünürlük.</p>
       <div class="session-badge" id="sessionBadge">Windows oturumu doğrulanıyor...</div>
       <nav class="quick-nav" aria-label="Dashboard bölümleri">
         <a href="#inventory">Keşif</a>
@@ -343,7 +343,7 @@
       <article class="card"><div class="label">Çevrimdışı</div><div class="value" id="statOffline" aria-live="polite">-</div></article>
       <article class="card"><div class="label">Hatalar</div><div class="value" id="statErrors" aria-live="polite">-</div></article>
       <article class="card"><div class="label">PST (GB)</div><div class="value" id="statPst" aria-live="polite">-</div></article>
-      <article class="card"><div class="label">NK2 / N2K</div><div class="value" id="statLegacy" aria-live="polite">-</div></article>
+      <article class="card"><div class="label">Legacy dosya</div><div class="value" id="statLegacy" aria-live="polite">-</div></article>
       <article class="card"><div class="label">SSD / NVMe</div><div class="value" id="statStorage" aria-live="polite">-</div></article>
     </section>
 
@@ -487,7 +487,7 @@
       <div class="section-head">
         <div>
           <h2 id="legacyTitle">Legacy Outlook dosyaları</h2>
-          <p>Cihazdaki tüm Windows profillerinden bulunan NK2 ve N2K autocomplete artefact'leri.</p>
+          <p>Cihazdaki tüm Windows profillerinden bulunan OST önbellekleri, NK2/N2K ve RoamCache autocomplete artefact'leri.</p>
         </div>
         <span class="panel-stamp" id="legacyPanelStamp">Yükleniyor</span>
       </div>
@@ -498,16 +498,18 @@
         <div class="field">
           <label for="legacyType">Dosya tipi</label>
           <select id="legacyType">
-            <option value="">NK2 + N2K</option>
+            <option value="">Hepsi</option>
+            <option value="OST">OST</option>
             <option value="NK2">NK2</option>
             <option value="N2K">N2K</option>
+            <option value="AUTOCOMPLETE">RoamCache autocomplete</option>
           </select>
         </div>
         <button id="filterLegacyButton" type="submit">Filtrele</button>
       </form>
       <div class="table-wrap">
         <table>
-          <caption class="sr-only">Tüm Windows profillerinde bulunan NK2 ve N2K dosyaları</caption>
+          <caption class="sr-only">Tüm Windows profillerinde bulunan OST, NK2, N2K ve autocomplete dosyaları</caption>
           <thead>
             <tr>
               <th scope="col">Tip</th><th scope="col">Cihaz</th><th scope="col">Kullanıcı</th><th scope="col">SID</th><th scope="col">Profil</th><th scope="col">Dosya yolu</th><th scope="col">Boyut</th><th scope="col">Son değişiklik</th><th scope="col">Erişim</th>
@@ -515,7 +517,7 @@
           </thead>
           <tbody id="legacyRows"></tbody>
         </table>
-        <p class="empty" id="legacyEmpty">Filtrelerle eşleşen NK2/N2K dosyası bulunamadı.</p>
+        <p class="empty" id="legacyEmpty">Filtrelerle eşleşen legacy Outlook dosyası bulunamadı.</p>
       </div>
       <p class="feedback" id="legacyFeedback" role="status" aria-live="polite"></p>
     </section>
