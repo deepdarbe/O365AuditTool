@@ -230,15 +230,28 @@ public class ActiveDirectoryTargetProvider : IDeviceTargetProvider
     // defaults are taken from a fresh CollectorOptions instance instead of being written twice.
     private static readonly CollectorOptions DefaultCollectorOptions = new();
 
-    private ExclusionPolicy ReadExclusionPolicy() => new(
-        ReadConfiguredPatterns("Collector:ExcludeDeviceNames"),
-        ReadConfiguredPatterns("Collector:ExcludeOus"),
-        _configuration.GetValue("Collector:ExcludeServerOperatingSystems", DefaultCollectorOptions.ExcludeServerOperatingSystems),
-        _configuration.GetValue("Collector:ExcludeDomainControllers", DefaultCollectorOptions.ExcludeDomainControllers),
+    private ExclusionPolicy ReadExclusionPolicy()
+    {
         // A blank operatingSystem is a hint rather than proof, so this rule is the one most likely
         // to drop a real workstation (joined but never booted). It defaults to OFF in
         // CollectorOptions; the per-reason summary above keeps any drop visible in the scan log.
-        _configuration.GetValue("Collector:ExcludeUnknownOperatingSystem", DefaultCollectorOptions.ExcludeUnknownOperatingSystem));
+        // The comment lives here rather than between two arguments because formatter versions
+        // disagree about a comment inside an argument list, which failed CI while passing locally.
+        var excludeUnknownOperatingSystem = _configuration.GetValue(
+            "Collector:ExcludeUnknownOperatingSystem",
+            DefaultCollectorOptions.ExcludeUnknownOperatingSystem);
+
+        return new ExclusionPolicy(
+            ReadConfiguredPatterns("Collector:ExcludeDeviceNames"),
+            ReadConfiguredPatterns("Collector:ExcludeOus"),
+            _configuration.GetValue(
+                "Collector:ExcludeServerOperatingSystems",
+                DefaultCollectorOptions.ExcludeServerOperatingSystems),
+            _configuration.GetValue(
+                "Collector:ExcludeDomainControllers",
+                DefaultCollectorOptions.ExcludeDomainControllers),
+            excludeUnknownOperatingSystem);
+    }
 
     private string[] ReadConfiguredPatterns(string key) =>
         (_configuration.GetSection(key).Get<string[]>() ?? [])
